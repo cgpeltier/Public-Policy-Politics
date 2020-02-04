@@ -2,10 +2,7 @@
 title: "The 2018 Georgia Governor Race"
 author: "Chad Peltier"
 date: "2/3/2020"
-output: 
-  html_document: 
-    keep_md: yes
-
+output: github_document
 ---
 The 2018 Georgia governor race between Stacey Abrams and Brian Kemp was notable not only for how close Democrats were to flipping a long-held Republican state (48.8% to 50.2%), but also for widespread reports of voter suppression. 
 
