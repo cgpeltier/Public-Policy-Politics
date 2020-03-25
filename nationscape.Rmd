@@ -496,7 +496,7 @@ ns_warren_intent2 %>%
 This model is intended to predict whether a Democrat intended to vote for Warren or not based on a variety of variable listed above, including: interest in the election, intention to vote, favorable opinion of Biden, favorable opinion of Sanders, indicators of racism, indicators of sexism, employment stats, whether they were born in the U.S. or abroad, union membership, age, gender, household income, education level, and population density of their congressional district. 
 
 
-```{r eval=FALSE}
+```{r cache=TRUE}
 
 ## Split data
 set.seed(1234)
@@ -541,8 +541,6 @@ rf_grid <- tune_grid(
 
 
 ```
-
-
 
 ```{r}
 rf_grid %>%
