@@ -1,0 +1,414 @@
+---
+title: "Who are the Republicans with Positive Views of Democrats"
+author: "Chad Peltier"
+date: "3/27/2020"
+output: github_document
+---
+
+One of the best books I've read recently was Ezra Klein's *Why We're Polarized*, which is a deep dive into all of the political science (and psychology, economics, sociology, etc.) research about political polarization.
+
+In the book he argues that political polarization has increased since the mid 20th-century, and has increasingly been tied to most other aspects of our identities. After the Dixiecrats largely left the Democratic Party following the civil rights movement, the parties became more internally homogenous and externally divided. 
+
+Obama-Trump voters are difficult to explain in the face of such intense political polarization, which makes me wonder more broadly about Republicans that currently hold favorable views of Democrats. Given the 2020 electoral importance of (1) long-time Democrats, many without college degrees, who voted for Trump in 2016 and live in the Midwest, and (2) [moderate suburban voters who flipped the House for Democrats in 2018](https://fivethirtyeight.com/features/the-suburbs-all-kinds-of-suburbs-delivered-the-house-to-democrats/), can we predict whether a self-identified Republican will have a favorable view of a Democrat (any Democrat)?  
+
+Using the UCLA + Democracy Fund Nationscape data along with CityLab population density data, we can start to answer these questions. 
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(naniar)
+library(tidymodels)
+library(tune)
+library(sf)
+library(tigris)
+library(tidycensus)
+library(vip)
+library(GGally)
+library(ggthemes)
+library(xgboost)
+library(ranger)
+library(nnet)
+```
+
+Let's start with some exploratory data analysis. We'll make three charts here: 
+
+* Republicans' favorability ratings of 7 Democrats (five who campaigned for the 2020 Democratic nomination, plus President Obama and Alexandria Ocasio Cortez) grouped by favorability rating (a four-level scale from very unfavorable to very favorable).
+* Republicans' favorability ratings of Democrats (ungrouped)
+* Candidate favorability by respondent party ID
+
+```{r}
+
+ns_sum <- read_csv("ns_sum.csv")
+
+
+## Only repubs - % by favorability
+ns_sum %>%
+    filter(pid7 > 4) %>%
+    select(starts_with("cand_fav"), 
+           -cand_favorability_pence, - cand_favorability_trump) %>%
+    pivot_longer(cols = starts_with("cand_fav"),names_to = "candidate", 
+                 values_to = "favorability") %>%
+    mutate(candidate = str_to_title(str_remove_all(candidate, "cand_favorability_"))) %>%
+    group_by(candidate, favorability) %>%
+    summarize(n = n()) %>%
+    filter(favorability != 999 & !is.na(favorability)) %>%
+    mutate(favorability = if_else(favorability == 1, "Very Favorable",
+                            if_else(favorability == 2, "Somewhat Favorable",
+                              if_else(favorability == 3 , "Somewhat Unfavorable", 
+                                if_else(favorability == 4, "Very Unfavorable", "other")
+                                )))) %>%
+    ggplot(aes(x = reorder(favorability, n), y = n, fill = candidate)) +
+        geom_col(position = "dodge") +
+        coord_flip() +
+        ggtitle("Percent of Republicans with at Least a Somewhat Favorable View of Democrats") +
+        theme_classic() +
+        xlab("Candidate") +
+        ylab("Number of respondents")
+        ggsave("repubs_dems_fav1.png", heigh = 9/1.2, width = 16/1.2)
+
+
+
+## Only repubs - % favorability
+ns_sum %>%
+    filter(pid7 > 4) %>%
+    select(starts_with("cand_fav"), 
+           -cand_favorability_pence, - cand_favorability_trump) %>%
+    pivot_longer(cols = starts_with("cand_fav"),names_to = "candidate", 
+                 values_to = "favorability") %>%
+    mutate(candidate = str_to_title(str_remove_all(candidate, "cand_favorability_"))) %>%
+    group_by(candidate, favorability) %>%
+    summarize(n = n()) %>%
+    filter(favorability != 999 & !is.na(favorability)) %>%
+    group_by(candidate) %>%
+    summarize(percent_favorable = sum(n[favorability == 1 | favorability == 2]) /
+                  sum(n)) %>%
+    mutate(candidate = fct_reorder(candidate, percent_favorable)) %>%
+      ggplot(aes(x = candidate, y = percent_favorable, fill = candidate)) +
+        geom_col(show.legend = FALSE) +
+        coord_flip() +
+        scale_y_continuous(labels = scales::percent_format()) +
+        ggtitle("Republicans' Favorability Ratings of Democrats") +
+        ggthemes::theme_fivethirtyeight()
+        ggsave("repubs_dems_fav2.png", heigh = 9/1.2, width = 16/1.2)
+
+
+
+## All party IDs
+table(ns_sum$pid7)
+
+fav_by_party <- ns_sum %>%
+    #filter(pid7 > 4) %>%
+    select(pid7, starts_with("cand_fav"), 
+           -cand_favorability_pence, - cand_favorability_trump) %>%
+    mutate(pid7 = as.factor(if_else(pid7 == 1, "Strong Democrat", if_else(pid7 == 2, 
+                    "Weak Democrat",
+                    if_else(pid7 == 3, "Lean Democrat", if_else(pid7 == 4, "Independent",
+                      if_else(pid7 == 5, "Lean Republican", if_else(pid7 == 6, 
+                        "Weak Republican", if_else(pid7 == 7, "Strong Republican", 
+                          "Skipped"))))))))) %>%
+    filter(pid7 != "Skipped") %>%
+    pivot_longer(cols = starts_with("cand_fav"),names_to = "candidate", 
+                 values_to = "favorability") %>%
+    mutate(candidate = str_to_title(str_remove_all(candidate, "cand_favorability_"))) %>%
+    group_by(pid7, candidate, favorability) %>%
+    summarize(n = n()) %>%
+    filter(favorability != 999 & !is.na(favorability)) %>%
+    group_by(pid7, candidate) %>%
+    summarize(percent_favorable = sum(n[favorability == 1 | favorability == 2]) /
+                  sum(n))
+
+fav_by_party$pid7 <- factor(fav_by_party$pid7, levels = c("Strong Republican",
+                              "Weak Republican", "Lean Republican", "Independent",
+                              "Lean Democrat", "Weak Democrat", "Strong Democrat"))
+
+fav_by_party %>%
+    mutate(candidate = fct_reorder(candidate, percent_favorable)) %>%
+      ggplot(aes(x = candidate, y = percent_favorable, fill = candidate)) +
+        geom_col(show.legend = FALSE) +
+        coord_flip() +
+        scale_y_continuous(labels = scales::percent_format()) +
+        ggthemes::theme_fivethirtyeight() +
+        facet_wrap(~ pid7) +
+        ggtitle("Democratic Candidate Favorability by Respondent Party") +
+        ggsave("repubs_dems_fav3.png", heigh = 9/1.2, width = 16/1.2)
+
+```
+
+The results are pretty interesting. Of Republican (those who identify as either "lean", "somewhat", or "strong" Republicans) respondents who had an opinion of the candidates, Sanders had the most unfavorables, but was second or third in the number of respondents with somewhat favorable of very favorable. It's possible that the "Very Unfavorable" ratings are most influenced by name recognition, as the most unfavorably-viewed candidates are also the most well known: Sanders, Warren, Obama, and Biden. Interestingly, Obama and Biden lead the way with somewhat favorable and very favorable ratings. 
+
+Removing the grouping by favorability, the above trends become a little more clear. Obama and Biden again lead with the greatest percentage of Republicans with a favorable view. But most strikingly,the largest drop-off isn't by candidate ideology, but by candidate gender: the three female Democratic candidates asked about in the Nationscape data also have the lowest favorability ratings among Republicans.  
+
+Segmenting the data by respondent party identification, Obama, Biden, and Buttigieg tend to have the highest favorability ratings from Republicans. Interestingly, Elizabeth Warren's greatest support comes from respondents who identify as strong Democrats. 
+
+# Data prep
+Next we'll prep and clean a smaller version of the Nationscape data for modeling, joining it with the CityLab density data, which is by Congressional district. We're going to try and predict whether a Republican will hold a favorable view of any Democrat or whether they dislike all of the seven candidates polled in the survey. 
+
+```{r}
+repub_views <- ns_sum %>%
+    filter(pid7 > 4) %>%
+    select(interest, vote_intention, racial_attitudes_tryhard, cand_favorability_obama,
+           cand_favorability_biden, cand_favorability_buttigieg, cand_favorability_cortez,
+           cand_favorability_harris, cand_favorability_sanders, cand_favorability_warren,
+           gender_attitudes_maleboss, gender_attitudes_logical, economy_better, religion, 
+           is_evangelical, gender_attitudes_opportunity, gender_attitudes_complain,
+           discrimination_blacks,
+           discrimination_men, discrimination_women, employment, foreign_born, in_union, 
+           age, gender, household_income, education, congress_district) %>%
+    mutate(student = if_else(employment == 7, 1, 0),
+           full_time = if_else(employment == 1, 1, 0),
+           unemployed = if_else(employment == 4, 1, 0),
+           cand_favorability_obama = if_else(cand_favorability_obama < 3, 1, 0),
+           cand_favorability_biden = if_else(cand_favorability_biden < 3 , 1, 0),
+           cand_favorability_buttigieg = if_else(cand_favorability_buttigieg < 3 , 1, 0),
+           cand_favorability_harris = if_else(cand_favorability_harris < 3 , 1, 0),
+           cand_favorability_warren = if_else(cand_favorability_warren < 3 , 1, 0),
+           cand_favorability_cortez = if_else(cand_favorability_cortez < 3 , 1, 0),
+           cand_favorability_sanders = if_else(cand_favorability_sanders < 3 , 1, 0),
+           protestant = if_else(religion == 1, 1, 0),
+           agn_atheist = if_else(religion == 10 | religion == 11, 1, 0)
+           ) %>%
+    select(-employment, -religion) %>%
+    replace_with_na_all(condition = ~.x == "888") %>%
+    replace_with_na_all(condition = ~.x == "999")
+
+
+## Add in citylab data
+citylab <- read_csv("citylab.csv")
+citylab <- citylab %>%
+    janitor::clean_names() %>%
+    mutate(cd = str_remove(cd, "-"),
+           cd = if_else(cd == "AKAL", "AK00", cd))
+
+repub_views <- repub_views %>%
+    inner_join(citylab, by = c("congress_district" = "cd")) %>%
+    mutate(like_dem = as.factor(if_else(cand_favorability_obama == 1 | 
+                                cand_favorability_biden ==1|
+                        cand_favorability_buttigieg == 1 | 
+                          cand_favorability_harris == 1 |
+                          cand_favorability_warren == 1 | 
+                          cand_favorability_cortez == 1 |
+                          cand_favorability_sanders == 1, "yes", "no")))
+
+repub_views2 <- repub_views %>%
+    select(-congress_district, -cluster, -cand_favorability_obama,
+           -cand_favorability_biden, -cand_favorability_buttigieg,
+           -cand_favorability_cortez, -cand_favorability_harris,
+           -cand_favorability_sanders, - cand_favorability_warren) %>% 
+    drop_na() 
+
+```
+
+# Explore data
+With the filtered data we can do a few more exploratory data plots, including a summary plot of relationships between a lot of the variables. 
+
+```{r}
+
+table(repub_views2$like_dem)
+
+skimr::skim(repub_views2)
+
+repub_ggpair <- repub_views2 %>%
+    select(like_dem, age, education, economy_better, discrimination_blacks,
+           household_income, high_density) %>%
+    GGally::ggpairs(mapping = aes(color = like_dem))
+
+print(repub_ggpair, progress = FALSE)
+```
+
+Notably, Republicans who hold a favorable opinion of at least one Democrat appear to live in higher density congressional districts, have a wider range of education and income levels, and be younger than those who dislike all Democrats. 
+
+```{r}
+
+ga_cd <- congressional_districts(class = "sf", cb = TRUE, resolution = "20m", progress_bar = FALSE)
+
+states <- tigris::states(progress_bar = FALSE)
+states <- states@data 
+states <- states %>%
+    select(STATEFP, NAME)
+
+ga_cd <- ga_cd %>% 
+    left_join(states, by = "STATEFP")
+
+state_abb <- state.abb %>%
+    tibble() %>%
+    cbind(state.name) %>%
+    rename(state_abb = 1)
+
+ga_cd <- ga_cd %>% 
+    left_join(state_abb, by = c("NAME" = "state.name"))
+
+ga_cd <- ga_cd %>%
+    unite(col = congress_district, state_abb, CD115FP, sep = "")
+
+
+repub_like_dem <- repub_views %>%
+    inner_join(ga_cd, by = "congress_district")
+
+repub_like_dem %>%
+    filter(!is.na(like_dem)) %>%
+    group_by(congress_district, like_dem) %>%
+    summarise(n = n()) %>%
+    group_by(congress_district) %>%
+    summarise(percent = sum(n[like_dem == "yes"])/sum(n)) %>%
+    left_join(ga_cd, by = "congress_district") %>%
+    filter(!str_detect(congress_district, "HI") & !str_detect(congress_district, "AK")) %>%
+    ggplot(aes(fill = percent)) +
+        geom_sf(aes(geometry = geometry)) +
+        borders("state")+
+        ggthemes::theme_map() +
+        ggtitle("Percent of Republicans Who Have a Positive View of at Least One Democrat") +
+        labs(caption = "Data from Democracy Fund + UCLA Nationscape project") +
+        #scale_fill_viridis(direction = -1) +
+        scale_fill_binned(type = "viridis", direction = -1)
+ggsave("ns_repub_likedem.png", width = 16/1.2, height = 9/1.2)
+
+```
+
+Mapping out the above data, we can see that Republicans with favorable views of Democrats might be more concentrated in cities and in California -- i.e., where Democrats typically live.
+
+# Modeling
+We'll do three models - a random forest, a gradient boosted tree model, and a neural network to try and predict which Republicans like at least one Democrat. 
+
+```{r}
+library(tune)
+
+set.seed(123)
+repub_split <- repub_views2 %>%
+    initial_split(prop = 0.8)
+
+repub_train <- training(repub_split)
+folds <- vfold_cv(repub_train, strata = like_dem)
+repub_test <- testing(repub_split)
+
+## Recipe
+repub_rec <- recipe(like_dem ~ ., data = repub_train) %>%
+    step_corr(all_numeric()) %>%
+    step_zv(all_numeric()) %>%
+    step_normalize(all_numeric()) %>%
+    step_upsample(like_dem) %>%
+    prep()
+
+repub_rec
+
+repub_juiced <- juice(repub_rec)
+
+
+## rf
+rf_spec <- rand_forest(mode = "classification",
+                       #mtry = tune(),
+                       #trees = 1000,
+                       #min_n = tune()
+                       ) %>%
+    set_engine("ranger", importance = "impurity")
+
+
+rf_grid <- tune_grid(
+    repub_rec,
+    model = rf_spec,
+    resamples = folds,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+
+## xgb
+#doParallel::registerDoParallel()
+xgb_spec <- boost_tree(mode = "classification",
+                       #mtry = tune(),
+                       #trees = 1000,
+                       #min_n = tune()
+                       ) %>%
+    set_engine("xgboost", importance = "impurity")
+
+
+xgb_grid <- tune_grid(
+    repub_rec,
+    model = xgb_spec,
+    resamples = folds,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+
+##nnet
+nnet_spec <- mlp(mode = "classification") %>%
+    set_engine("nnet")
+
+nnet_grid <- tune_grid(
+    repub_rec,
+    model = nnet_spec,
+    resamples = folds,
+    control = control_resamples(save_pred = TRUE)
+    )
+
+
+## evaluate training
+rf_grid %>%
+    collect_metrics() 
+
+xgb_grid %>%
+    collect_metrics()
+
+nnet_grid %>%
+    collect_metrics()
+
+rf_grid %>%
+    show_best("roc_auc") 
+xgb_grid %>%
+    show_best("roc_auc")
+rf_grid %>%
+    show_best("accuracy") 
+xgb_grid %>%
+    show_best("accuracy") 
+
+rf_best <- rf_grid %>%
+    select_best(metric = "roc_auc")
+
+xgb_best <- xgb_grid %>%
+    select_best(metric = "roc_auc")
+
+nnet_best <- nnet_grid %>%
+    select_best(metric = "roc_auc")
+
+final_model_rf <- rf_spec %>%
+    update(mtry = rf_best$mtry, min_n = rf_best$min_n) %>%
+    fit(like_dem ~ ., data = repub_juiced)
+
+final_model_xgb <- xgb_spec %>%
+    #update(mtry = xgb_best$mtry, min_n = xgb_best$min_n) %>%
+    fit(like_dem ~ ., data = repub_juiced)
+
+final_model_nnet <- nnet_spec %>%
+    #update(mtry = xgb_best$mtry, min_n = xgb_best$min_n) %>%
+    fit(like_dem ~ ., data = repub_juiced)
+
+## Variable Importance
+library(vip)
+final_model_rf %>%
+    vip()
+
+final_model_xgb %>%
+    vip()
+
+## Test data evaluation
+final_model_rf %>%
+    predict(new_data = bake(repub_rec, repub_test)) %>%
+    mutate(truth = repub_test$like_dem) %>%
+    accuracy(truth, .pred_class) %>%
+    mutate(model = "rf") %>%
+    bind_rows(final_model_xgb %>% 
+                predict(new_data = bake(repub_rec, repub_test)) %>%
+        mutate(truth = repub_test$like_dem) %>%
+        accuracy(truth, .pred_class) %>% mutate(model = "xgb")) %>%
+    bind_rows(final_model_nnet %>% 
+                predict(new_data = bake(repub_rec, repub_test)) %>%
+        mutate(truth = repub_test$like_dem) %>%
+        accuracy(truth, .pred_class) %>% mutate(model = "nnet"))
+
+
+```
+
+Of the three models, the random forest performed best on the training data (by far) but was clearly overfit despite using k-folds cross validation. The gradient boosted tree and neural network models didn't perform quite as well, but also didn't suffer from overfitting. 
+
+Looking at the variable importance plot for the graident boosted tree model, three variables stand out: a question that asks respondents the amount of discrimination that African Americans face in the U.S. today, respondent age, and whether the respondent thinks the economy is better than at this point a year ago. 
+
+Given what we saw in the GGpairs plot above, it's not surprising that age is a critical factor affecting Republicans' views. Younger Republicans are more likely to have a positive view of at least one Democrat. The most important predictor might suggest that Republicans who don't view any Democrat favorably are more likely to believe that African Americans face less discrimination. The variable importance plot doesn't make this explicit, but that would be my guess based on the Democratic base's diversity relative to the Republican base. That is also supported by the GGpairs plot above, which shows Republicans that like at least one Democrat with a much lower boxplot (indicating that they believe African Americans face more discrimination). Finally, it's possible that the "economy_better" variable indicates that Republicans with a favorable view of a Democrat believe the economy hasn't improved from a year ago. 
+
+To me, this suggests (at the very least) that there may be an opportunity for Democrats to flip voters who identify as Republicans that are younger and/or aren't seeing their own finances improve despite the gains in the stock market (or at least the pre-coronavirus stock market gains). 
