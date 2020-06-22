@@ -1,0 +1,325 @@
+---
+title: "Where to Live"
+author: "Chad Peltier"
+date: "6/16/2020"
+output: github_document
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(osmdata)
+library(tidycensus)
+library(GSODR)
+library(rnaturalearth)
+library(sf)
+library(elections)
+library(tigris)
+library(opencage)
+
+acs_vars <- load_variables(2018, "acs5", cache = TRUE)
+
+```
+
+
+
+# Load data 
+
+1. 2016 R vs. Blue by cd
+2. Medicaid expansion by state
+3. Temperature - avg high temps in summer
+4. Temperature - avg high temps in winter
+5. Temperature - avg low temps in winter 
+6. Number of cloudy days 
+7. Proximity to library
+8. Proximity to trail
+
+
+```{r}
+
+## base map from rnaturalearth
+us <- ne_countries(type = "map_units", 
+                   country = "United States of America", 
+                   returnclass = "sf",
+                   scale = "large")
+
+## get acs data
+us_acs <- get_acs(geography = "congressional district", 
+                  geometry = TRUE,
+                  variables = "B23006_001")
+
+us_no_geom <- us_acs %>%
+    st_drop_geometry()
+
+states <- tibble(state.name, state.abb)
+
+
+## Add presidential results, clean 
+pres_cd <- politicaldata::pres_results_by_cd %>%
+    unite(congress_district, state_abb, district, sep = " ") %>%
+    filter(year == 2016) %>%
+    select(congress_district, dem)
+
+us_acs2 <- us_acs %>%
+    mutate(state = str_extract(NAME, "(?<=\\), ).+"),
+           district = str_extract(NAME, "(?<=Congressional District ).+(?= \\()"),
+           district = if_else(district == "(at Large)", "1", district)) %>%
+    left_join(states, by = c("state" = "state.name")) %>%
+    unite(congress_district, state.abb, district, sep = " ", remove = FALSE) %>%
+    select(-c(NAME, variable, estimate, moe, state.abb, district, GEOID)) %>%
+    left_join(pres_cd, by = "congress_district") %>%
+    filter(!state %in% c("Hawaii", "Alaska", "Puerto Rico")) %>%
+    st_set_crs(4326)
+
+
+## visualize dem vote % in 2016
+ggplot(us_acs2) + 
+    geom_sf(aes(fill = dem)) + 
+    scale_fill_viridis_b(direction = -1)
+
+
+```
+
+
+# Weather data
+
+
+https://rdrr.io/cran/GSODR/f/vignettes/GSODR.Rmd
+
+```{r}
+us_no_geom <- us_acs2 %>%
+    st_drop_geometry()
+
+usa_weather <- get_GSOD(years = 2017, country = "USA")
+
+avg_rain<- usa_weather %>%
+    mutate(PRCP = if_else(is.na(PRCP), 0, PRCP)) %>%
+    group_by(NAME) %>%
+    summarize(avg_rain = mean(PRCP, na.rm = TRUE)) %>%
+    arrange(desc(avg_rain)) %>%
+    left_join(usa_weather %>% select(NAME, LONGITUDE, LATITUDE), by = "NAME") %>%
+    distinct(NAME, .keep_all = TRUE) %>%
+    st_as_sf(coords = c("LONGITUDE", "LATITUDE")) %>%
+    st_set_crs(4326)
+
+## Join with rain data
+us_acs3 <- us_acs2 %>%
+    st_transform(crs = 4326) %>%
+    st_join(avg_rain)
+
+us_acs4 <- us_acs3 %>%
+    st_drop_geometry() %>%
+    drop_na(dem, NAME) %>%
+    distinct(congress_district, .keep_all = TRUE)
+    
+
+## Join with summer temps data
+avg_temp_summer <- usa_weather %>%
+    mutate(TEMP = if_else(is.na(TEMP), 0, TEMP)) %>%
+    filter(MONTH %in% 7:9) %>%
+    group_by(NAME) %>%
+    summarize(avg_temp = mean(TEMP, na.rm = TRUE)) %>%
+    left_join(usa_weather %>% select(NAME, LONGITUDE, LATITUDE), by = "NAME") %>%
+    distinct(NAME, .keep_all = TRUE) %>%
+    st_as_sf(coords = c("LONGITUDE", "LATITUDE"))
+
+us_acs5 <- us_acs4 %>%
+    left_join(avg_temp_summer, by = "NAME")
+
+```
+
+### NOAA weather data
+
+```{r}
+
+## Add NOAA clouds data 
+clouds <- read_table("clouds.txt")
+
+clouds2 <- clouds %>%
+    rename(station = `13876BIRMINGHAM AP, AL 37 7 6 18 7 6 15 7 8 16 9 8 13 8 11 12 7 13 10 5 14 12 7 15 10 9 9 11 14 8 9 10 7 13 8 7 16 99 111 155`) %>%
+    separate(station, into = c("station", "data"), sep = "(?<=\\,\\s\\w\\w)\\s") %>%
+    separate(data, into = paste0("v", seq_len(40)), sep = "\\s") %>%
+    select(station, v38:v40) %>%
+    rename(annual_clear = v38, annual_pc = v39, annual_cloudy = v40) %>%
+    mutate(station = str_remove_all(station, "\\d+"),
+           station = str_to_title(station)) 
+
+
+## function to clean coordinates using opencage + change units to dec_deg
+clean_coords <- function(x){
+    temp <- opencage_forward(placename = x, country = "US")$results[1,1:2]
+    temp %>%
+        rename(lat = annotations.DMS.lat, long = annotations.DMS.lng) %>%
+        mutate(lat = str_replace_all(lat, "[\\'\\°NW]", ""),
+               long = str_replace_all(long, "[\\'\\°NW]", ""),
+               lat = measurements::conv_unit(lat, from = "deg_min_sec", 
+                                             to = "dec_deg"),
+               long = measurements::conv_unit(long, from = "deg_min_sec", 
+                                              to = "dec_deg")) 
+}
+
+
+## clean station names 
+stations <- tibble(clouds2$station) %>%
+    janitor::clean_names() %>%
+    filter(!str_detect(clouds2_station, "\\, Ak"),
+           !str_detect(clouds2_station, "\\, Dc"),
+           !str_detect(clouds2_station, "\\, Pc"),
+           !str_detect(clouds2_station, "\\, Pr"),
+           !str_detect(clouds2_station, "(North)"),
+           !str_detect(clouds2_station, "Atlantic City"),
+           !str_detect(clouds2_station, "New York (Jfk Ap), Ny"),
+           !str_detect(clouds2_station, "New York (Laguardia Ap), Ny"),
+           ) %>%
+    mutate(clouds2_station = if_else(clouds2_station == "New York C.park, Ny",
+                                     str_remove(clouds2_station, "C.park, "), 
+                                     clouds2_station),
+           clouds2_station = if_else(clouds2_station == "Greensboro-Wnstn-Salm-Hghpt, Nc",
+                                     str_remove(clouds2_station, "-Wnstn-Salm-Hghpt"), 
+                                     clouds2_station),
+           clouds2_station = str_remove(clouds2_station, " Ap"),
+           clouds2_station = str_remove(clouds2_station, "Greater"),
+           clouds2_station = str_remove(clouds2_station, " / Harrisburg I Apt"),
+           clouds2_station = str_remove(clouds2_station, ", Yes"))
+
+
+## clean coords using possibly
+
+possibly_clean_coords <- possibly(clean_coords, otherwise = NA_real_)
+
+
+test <- map(stations$clouds2_station, possibly_clean_coords) %>%
+    bind_rows()
+
+
+## join cleaned coords with clouds data 
+
+clouds2 <- clouds2 %>%
+    filter(!str_detect(station, "\\, Ak"),
+           !str_detect(station, "\\, Dc"),
+           !str_detect(station, "\\, Pc"),
+           !str_detect(station, "\\, Pr"),
+           !str_detect(station, "(North)"),
+           !str_detect(station, "Atlantic City"),
+           !str_detect(station, "New York (Jfk Ap), Ny"),
+           !str_detect(station, "New York (Laguardia Ap), Ny"),
+           ) %>%
+    mutate(station = if_else(station == "New York C.park, Ny",
+                                     str_remove(station, "C.park, "), 
+                                     station),
+           station = if_else(station == "Greensboro-Wnstn-Salm-Hghpt, Nc",
+                                     str_remove(station, "-Wnstn-Salm-Hghpt"), 
+                                     station),
+           station = str_remove(station, " Ap"),
+           station = str_remove(station, "Greater"),
+           station = str_remove(station, " / Harrisburg I Apt"),
+           station = str_remove(station, ", Yes")) 
+
+
+
+
+clouds3 <- test %>%
+    mutate(long = paste0("-", long)) %>%
+    bind_cols(stations) %>%
+    rename(station = clouds2_station) %>%
+    left_join(clouds2, by = "station") %>%
+    st_as_sf(coords = c("long", "lat"), crs = 4326)
+
+    
+clouds4 <- us_acs2 %>%
+    select(congress_district) %>%
+    st_join(clouds3, join = st_is_within_distance, 20000) %>%
+    st_drop_geometry()
+
+us_acs6 <- us_acs5 %>%
+    left_join(clouds4, by = "congress_district") %>%
+    distinct(congress_district, .keep_all = TRUE) %>%
+    mutate(across(c(starts_with("annual_")), as.numeric)) %>%
+    select(-c(station, geometry))
+
+```
+
+### Add temp by month 
+
+```{r}
+
+summer_temps <- usa_weather %>%
+    group_by(NAME) %>%
+    filter(MONTH %in% 7:9) %>%
+    summarize(summer_temp = mean(TEMP, na.rm = TRUE)) %>%
+    left_join(usa_weather %>% select(NAME), by = "NAME") %>%
+    distinct(NAME, .keep_all = TRUE) 
+
+
+winter_temps <- usa_weather %>%
+    group_by(NAME) %>%
+    filter(MONTH %in% 1:3) %>%
+    summarize(winter_temp = mean(TEMP, na.rm = TRUE)) %>%
+    left_join(usa_weather %>% select(NAME), by = "NAME") %>%
+    distinct(NAME, .keep_all = TRUE) %>%
+    left_join(summer_temps)
+
+
+us_acs7 <- us_acs6 %>%
+    left_join(winter_temps, by = "NAME") %>%
+    select(-NAME, -avg_temp) %>%
+    mutate(winter_temp = measurements::conv_unit(winter_temp, from = "C", to = "F"),
+           summer_temp = measurements::conv_unit(summer_temp, from = "C", to = "F"))
+
+
+
+```
+
+
+
+### Charts 
+
+```{r}
+us_acs7 %>%
+    filter(!is.na(annual_cloudy)) %>%
+    ggplot(aes(x = annual_cloudy, y = avg_rain)) +
+    geom_point() +
+    geom_smooth()
+
+us_acs7 %>%
+    filter(!is.na(annual_cloudy)) %>%
+    ggplot(aes(x = avg_rain, y = dem)) +
+    geom_point() +
+    geom_smooth()
+
+```
+
+
+# Add Medicaid expansion
+
+```{r}
+no_medicaid <- c("Wyoming", "South Dakota", "Wisconsin", "Kansas", "Missouri",
+                 "Oklahoma", "Texas", "Tennessee", "Mississippi", "North Carolina",
+                 "South Carolina", "Georgia", "Alabama", "Florida")
+
+
+us_acs8 <- us_acs7 %>%
+    mutate(medicaid_expansion = if_else(state %in% no_medicaid, 0, 1))
+
+
+us_acs8 <- us_acs2 %>%
+    select("congress_district") %>%
+    left_join(us_acs8, by = "congress_district")
+
+
+us_no_geom <- us_acs8 %>%
+    st_drop_geometry()
+
+```
+
+
+# Add OpenStreetMap data
+
+```{r}
+
+
+
+```
+
+
+
+
