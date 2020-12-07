@@ -1,0 +1,712 @@
+---
+title: "Beer "
+author: "Chad Peltier"
+date: "12/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+```{r}
+library(tidytuesdayR)
+library(janitor)
+library(tidyverse)
+library(sf)
+library(leaflet)
+library(patchwork)
+library(tidytext)
+
+```
+
+
+```{r include=FALSE, eval=FALSE}
+
+gabf <- tt_load("2020-10-20")
+production <- tt_load("2020-03-31")
+
+gabf <- gabf$beer_awards
+
+gabf2 <- gabf %>%
+    mutate(brewery = str_remove(brewery, "-.+"),
+           brewery = str_remove(brewery, " & Tasting Room"),
+           brewery = str_remove(brewery, " & Grill"),
+           brewery = str_remove(brewery, " & Kitchen"),
+           brewery = str_remove(brewery, " & Brewpub"), 
+           brewery = str_remove(brewery, " Co\\.|Company|Co/Ohio"),
+           brewery = str_trim(brewery))
+
+beer_states <- production$beer_states
+beer_taxed <- production$beer_taxed
+brewer_size <- production$brewer_size
+brewing_materials <- production$brewing_materials
+
+```
+
+
+# By style
+
+
+```{r}
+styles <- read_html(paste0("https://www.beeradvocate.com/beer/styles/")) 
+
+style_nums <- styles %>%
+    html_nodes("a") %>%
+    html_attr("href") %>%
+    tibble() %>%
+    rename("links" = 1) %>%
+    filter(str_detect(links, "styles/")) %>%
+    mutate(style_num = parse_number(links)) %>%
+    drop_na(style_num)
+
+
+pages <- seq(from = 0, to = 5000, by = 50)
+
+style_nums2 <- rep(style_nums$style_num, times = length(pages)) %>%
+    enframe() %>%
+    arrange(value) %>%
+    pull(value)
+
+
+pages2 <- rep(pages, times = (length(style_nums2) / length(pages)))
+
+style_pages <- tibble(style_nums2, pages2)
+    
+```
+
+
+https://thecodeforest.github.io/post/beers_and_text.html
+
+
+```{r eval=FALSE}
+get_reviews_style <- function(style_num, page){
+  
+  
+  url <- read_html(paste0("https://www.beeradvocate.com/beer/styles/",
+                          style_num, 
+                          "/?sort=revD&start=", page) )
+  
+  stats <- url %>% 
+      html_nodes("table") %>%
+      html_table(fill = TRUE) %>%
+      tibble() %>%
+      unnest(".") %>%
+      slice(-c(1:2)) %>%
+      row_to_names(1) %>%
+      remove_empty() %>%
+      slice(1:n()-1)
+  
+  style <- url %>%
+      html_node("h1") %>%
+      html_text()
+  
+   beer_links <- url %>%
+      html_nodes("a") %>%
+      html_attr("href") %>%
+      tibble() %>%
+      rename("links" = 1) %>%
+      filter(str_detect(links, "\\/beer\\/profile\\/\\d+\\/\\d+\\/")) %>%
+      mutate(links = paste0("https://beeradvocate.com", links))
+  
+  
+  stats <- stats %>%
+      mutate(beer_style = style) %>%
+      bind_cols(beer_links)
+  
+}
+
+top_beers <- map2(style_pages$style_nums2, style_pages$pages2,
+                  ~ get_reviews_style(.x, .y)) %>%
+    bind_rows() 
+
+## Clean and filter to only beers with > 20 ratings, adds broad style and substyle cols
+top_beers2 <- top_beers %>%
+  clean_names() %>%
+  mutate(broad_style = str_extract(beer_style, ".+(?= - )"),
+         sub_style = str_extract(beer_style, "(?<= - ).+"),
+         broad_style = if_else(is.na(broad_style), beer_style, broad_style),
+         sub_style = if_else(is.na(sub_style), beer_style, sub_style),
+         ratings = parse_number(ratings),
+         abv = parse_number(abv),
+         avg = parse_number(avg),
+         brewery = str_remove(brewery, "-.+"),
+         brewery = str_remove(brewery, " & Tasting Room"),
+         brewery = str_remove(brewery, " & Grill"),
+         brewery = str_remove(brewery, " & Kitchen"),
+         brewery = str_remove(brewery, " & Brewpub"),
+         brewery = str_remove(brewery, " Co\\."),
+         brewery = str_remove(brewery, " Company"),
+         brewery = str_trim(brewery),
+         across(c(abv, ratings,avg), as.numeric)) %>%
+  filter(ratings > 10) %>%
+  mutate(group_num = rep(1:10, each = 4692, length.out = nrow(.)))
+
+```
+
+
+
+```{r include=FALSE}
+top_beers2 <- read_csv("C:\\data_projects\\non_defense_projects\\top_beers2.csv")
+```
+
+
+
+# Reviews and other stats 
+Pulls from beer page, gets: brewery state, BA judges' score, last 25 user reviews
+
+```{r}
+get_more_beer_info <- function(url){
+  
+  ## Brewery state, BA score
+    state_names <- state.name
+    country_names <- str_trim(ISOcodes::UN_M.49_Countries$Name)
+    
+    info <- read_html(url) %>%
+        html_nodes("div") %>%
+        html_text() %>%
+        enframe() %>%
+        mutate(value = str_remove_all(value, "\n"),
+               value = str_replace(value, "Avail", " Avail")) %>%
+        filter(str_detect(value, "^Beer Geek Stats:")) %>%
+        mutate(state = str_extract(value, paste(state_names, collapse = "|")),
+               country = str_extract(value, paste(country_names, collapse = "|")),
+               score = str_extract(value, "(?<=Score:)\\d+"),
+               links = url) 
+    
+    info # comment out if including user reviews
+                               
+    ## Most recent 25 user reviews
+    # reviews <- read_html(url) %>%
+    #     html_nodes("#rating_fullview_content_2") %>%
+    #     html_text() %>%
+    #     enframe() %>%
+    #     mutate(value = str_remove_all(value, ".+(?=overall:)"),
+    #            value = str_remove_all(value, "\n")) %>%
+    #     summarize(reviews = paste(value, collapse = "|")) %>%
+    #     mutate(links = url)
+    # 
+    #   info %>%
+    #       left_join(reviews, by = "links")
+}      
+
+## map across all beers in top_beers2 df
+more_beer_info <- map_df(top_beers2$links, get_more_beer_info)
+
+## join with top_beers2 df
+top_beers3 <- top_beers2 %>%
+    left_join(more_beer_info, by = "links") %>%
+    mutate(score = as.numeric(score))
+
+```
+
+
+
+```{r include=FALSE, eval=FALSE}
+
+gabf2 %>%
+    left_join(top_beers3, by = c( "beer_name" = "name", "brewery" = "brewery"))
+
+```
+
+
+```{r include=FALSE}
+top_beers3 <- read_csv("top_beers3.csv")
+```
+
+
+# Analysis
+
+
+```{r}
+top_beers3 %>%
+    count(broad_style, sort = TRUE) 
+
+top_beers3 %>%
+    filter(is.na(broad_style)) %>%
+    count(beer_style, sort = TRUE)
+
+```
+
+
+# Analysis
+
+```{r}
+
+## num/percent of beers > 4 rating
+top_beers3 %>%
+    group_by(broad_style) %>%
+    summarize(n = n(),
+              n_over4 = sum(avg >= 4, na.rm = TRUE),
+              percent_over4 = round((n_over4 / n),2)) %>%
+    filter(!is.na(broad_style)) %>%
+    ggplot(aes(percent_over4, reorder(broad_style, percent_over4), fill = broad_style)) +
+    geom_col() +
+    theme_classic() + 
+    theme(legend.position = "none",
+          text = element_text(size=9))  +
+    labs(y = "Beer Style", x = "Percent of Beers with an Average Rating >= 4", 
+         title = "Percent of Beers with an Average Rating >= 4") +
+    scale_x_continuous(labels = scales::percent_format()) 
+
+top_beers3 %>%
+    group_by(broad_style) %>%
+    summarize(n = n(),
+              n_over4 = sum(avg >= 4, na.rm = TRUE),
+              percent_over4 = round((n_over4 / n),2)) %>%
+    filter(!is.na(broad_style)) %>%
+    ggplot(aes(n_over4, reorder(broad_style, n_over4), fill = broad_style)) +
+    geom_col() +
+    theme_classic() + 
+    theme(legend.position = "none",
+          text = element_text(size=9))  +
+    labs(y = "Beer Style", x = "Number of Beers with an Average Rating >= 4",
+         title = "Number of Beers with an Average Rating >= 4")
+
+top_beers3 %>%
+    group_by(broad_style) %>%
+    summarize(n = n(),
+              n_over90 = sum(score >= 90, na.rm = TRUE),
+              percent_over90 = round((n_over90 / n),2)) %>%
+    filter(!is.na(broad_style)) %>%
+    ggplot(aes(percent_over90, reorder(broad_style, percent_over90), fill = broad_style)) +
+    geom_col() +
+    theme_classic() + 
+    theme(legend.position = "none",
+          text = element_text(size=9))  +
+    labs(y = "Beer Style", x = "Percent of Beers with a BA Score >= 90",
+         title = "Percent of Beers by General Style with a BA Score >= 90") +
+    scale_x_continuous(labels = scales::percent_format())
+
+```
+
+
+
+
+
+```{r}
+
+## distribution of reviews
+top_beers3 %>%
+    filter(!is.na(broad_style)) %>%
+    ggplot(aes(avg, reorder(broad_style, avg), color = broad_style)) + 
+    #geom_jitter(aes(alpha = 0.3)) + 
+    geom_boxplot() + 
+    theme_classic() + 
+    theme(legend.position = "none",
+          text = element_text(size=9))  +
+    labs(y = "Beer Style", x = "Avg Rating")
+
+## Most divisive styles (within-style IQR)
+top_beers3 %>%
+    group_by(broad_style) %>%
+    summarize(iqr = IQR(avg)) %>%
+    filter(!is.na(broad_style)) %>%
+    arrange(desc(iqr)) %>%
+    slice_max(order_by = iqr, n = 20) %>%
+    ggplot(aes(iqr, reorder(broad_style, iqr), color = broad_style)) +
+    geom_point() + 
+    geom_segment(aes(x = 0, xend = iqr, y = broad_style, yend = broad_style)) +
+    theme_classic() +
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          legend.position = "none",
+          text = element_text(size=9)) +
+    labs(x = "Interquartile range", y = "Beer Style",
+         title = "Most Divisive Beer Styles")
+
+## Most divisive substyles (within-style IQR)
+top_beers3 %>%
+    group_by(beer_style) %>%
+    summarize(iqr = IQR(avg)) %>%
+    filter(!is.na(beer_style)) %>%
+    arrange(desc(iqr)) %>%
+    slice_max(order_by = iqr, n = 20) %>% 
+    ggplot(aes(iqr, reorder(beer_style, iqr), color = beer_style)) +
+    geom_point() + 
+    geom_segment(aes(x = 0, xend = iqr, y = beer_style, yend = beer_style)) +
+    theme_classic() +
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=9),
+          legend.position = "none") +
+    labs(x = "Interquartile range", y = "Beer substyle",
+         title = "Most Divisive Beer Substyles")
+
+# Least divisive substyles (within-style IQR)
+top_beers3 %>%
+    group_by(beer_style) %>%
+    summarize(iqr = IQR(avg)) %>%
+    filter(!is.na(beer_style)) %>%
+    arrange(desc(iqr)) %>%
+    slice_min(order_by = iqr, n = 20) %>%
+    ggplot(aes(iqr, reorder(beer_style, -iqr), color = beer_style)) +
+    geom_point() + 
+    geom_segment(aes(x = 0, xend = iqr, y = beer_style, yend = beer_style)) +
+    theme_classic() +
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=9),
+          legend.position = "none") +
+    labs(x = "Interquartile range", y = "Beer substyle",
+         title = "Least Divisive Beer Substyles")    
+
+
+    
+```
+
+
+```{r}
+## Relationships between things 
+
+## ABV vs. beer styles (broad style and beer style)
+top_styles <- top_beers3 %>%
+    count(broad_style, sort = TRUE) %>%
+    top_n(9)
+
+top_beers3 %>%
+    filter(broad_style %in% top_styles$broad_style,
+           abv < 20) %>%
+    ggplot(aes(abv, avg)) + 
+    geom_point(aes(alpha = 0.4, color = broad_style)) +
+    geom_smooth() +
+    facet_wrap(~broad_style, scales = "free_x") +
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          legend.position = "none") + 
+    labs(y = "Avg Rating", x = "ABV", title = "ABV vs. Avg User Rating by General Style")
+
+top_styles <- top_beers3 %>%
+    count(beer_style, sort = TRUE) %>%
+    top_n(9)
+
+
+top_beers3 %>%
+    filter(abv < 20,
+           beer_style %in% top_styles$beer_style) %>%
+    ggplot(aes(abv, avg)) + 
+    geom_point(aes(alpha = 0.4, color = beer_style)) +
+    geom_smooth() +
+    facet_wrap(~beer_style, scales = "free_x") +
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          legend.position = "none") + 
+    labs(y = "Avg Rating", x = "ABV", title = "ABV vs. Avg User Rating by Substyle")
+
+
+## Ratings and Avg score
+top_beers3 %>%
+    filter(beer_style %in% top_styles$beer_style) %>%
+    ggplot(aes(ratings, avg)) + 
+    geom_point(aes(alpha = 0.4, color = beer_style)) +
+    geom_smooth() +
+    facet_wrap(~beer_style, scales = "free_x") +
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          legend.position = "none") +
+    labs(y = "Avg Rating", x = "Number of Ratings", title = "Number of Ratings vs. Avg User Rating by General Style")
+
+```
+
+
+
+
+
+```{r}
+## top breweries by style (brewery has to have 3 or more examples)
+library(tidytext)
+
+top_styles <- top_beers3 %>%
+    count(broad_style, sort = TRUE) %>%
+    top_n(9)
+
+top_beers3 %>%
+    group_by(broad_style, brewery) %>%
+    summarize(n = n(),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    filter(n > 2,
+           !is.na(broad_style),
+           broad_style %in% top_styles$broad_style) %>%
+    group_by(broad_style) %>%
+    slice_max(n = 10, order_by = avg_rating) %>%
+    ggplot(aes(avg_rating, reorder_within(brewery, avg_rating, broad_style), 
+               color = broad_style)) +
+    geom_point() +
+    geom_segment(aes(x = 0, xend = avg_rating, 
+                     y = reorder_within(brewery, avg_rating, broad_style), 
+                     yend = reorder_within(brewery, avg_rating, broad_style))) +
+    facet_wrap(~broad_style, scales = "free_y") +
+    scale_y_reordered() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=9),
+          legend.position = "none") +
+    labs(x = "Average Rating", y = "Brewery", title = "Top Breweries by Style")
+
+
+
+top_styles <- top_beers3 %>%
+    count(beer_style, sort = TRUE) %>%
+    top_n(9)
+
+top_beers3 %>%
+    group_by(beer_style, brewery) %>%
+    summarize(n = n(),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    filter(n > 2,
+           !is.na(beer_style),
+           beer_style %in% top_styles$beer_style) %>%
+    group_by(beer_style) %>%
+    slice_max(n = 10, order_by = avg_rating) %>%
+    ggplot(aes(avg_rating, reorder_within(brewery, avg_rating, beer_style), 
+               color = beer_style)) +
+    geom_point() +
+    geom_segment(aes(x = 0, xend = avg_rating, 
+                     y = reorder_within(brewery, avg_rating, beer_style), 
+                     yend = reorder_within(brewery, avg_rating, beer_style))) +
+    facet_wrap(~beer_style, scales = "free_y") +
+    scale_y_reordered() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=7),
+          legend.position = "none") +
+    labs(x = "Average Rating", y = "Brewery", title = "Top Breweries by Substyle")
+
+```
+
+
+
+```{r}
+
+## Breweries that are awesome at multiple styles (best breweries in the country?)
+## (number of styles that a brewery has a top 20 avg rating in)
+top_beers3 %>%
+    group_by(broad_style, brewery) %>%
+    summarize(n = n(),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    filter(n > 2) %>% 
+    group_by(broad_style) %>% 
+    slice_max(order_by = avg_rating, n = 20) %>%
+    ungroup() %>%
+    count(brewery, sort = TRUE) %>%
+    slice_max(order_by = n, n = 20) %>%
+    ggplot(aes(n, reorder(brewery,n),  fill = brewery)) + 
+    geom_col() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=10),
+          legend.position = "none") +
+    labs(x = "Number of Styles w/ Top 20 Avg Rating", y = "Brewery",
+         title = "Breweries That Are Awesome at Multiple Styles")
+
+## By score > Rating
+top_beers3 %>%
+    group_by(broad_style, brewery) %>%
+    summarize(n = n(),
+              avg_rating = round(mean(score, na.rm = TRUE), 2)) %>%
+    filter(n > 2) %>% 
+    group_by(broad_style) %>% 
+    slice_max(order_by = avg_rating, n = 20) %>%
+    ungroup() %>%
+    count(brewery, sort = TRUE) %>%
+    slice_max(order_by = n, n = 20) %>%
+    ggplot(aes(n, reorder(brewery,n),  fill = brewery)) + 
+    geom_col() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=10),
+          legend.position = "none") +
+    labs(x = "Number of Styles w/ Top 20 Avg Score", y = "Brewery",
+         title = "Breweries That Are Awesome at Multiple Styles")
+
+
+top_beers3 %>%
+    group_by(beer_style, brewery) %>%
+    summarize(n = n(),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    filter(n > 2) %>% 
+    group_by(beer_style) %>% 
+    slice_max(order_by = avg_rating, n = 10) %>%
+    ungroup() %>%
+    count(brewery, sort = TRUE) %>%
+    slice_max(order_by = n, n = 20) %>%
+    ggplot(aes(n, reorder(brewery,n),  fill = brewery)) + 
+    geom_col() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(), 
+          text = element_text(size=10),
+          legend.position = "none") +
+    labs(x = "Number of Beer Substyles w/ Top 20 Avg Rating", y = "Brewery",
+         title = "Breweries That Are Awesome at Multiple Substyles")
+
+
+```
+
+
+
+```{r}
+## relationship bet score and avg rating
+top_styles <- top_beers3 %>%
+    count(broad_style, sort = TRUE) %>%
+    top_n(9)
+
+top_beers3 %>%
+    filter(broad_style %in% top_styles$broad_style) %>%
+    ggplot(aes(x = score, y = avg, color = broad_style, alpha = 0.4)) +
+    geom_point() + 
+    theme_classic() + 
+    theme(panel.grid.major.y = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks.y = element_blank(),
+          legend.position = "none") +
+    facet_wrap(~ broad_style, scales = "free") + 
+    labs(x = "Beer Advocate Score", y = "Avg User Rating",
+         title = "Comparison Between Beer Advocate Scores and User Ratings")
+```
+
+
+
+
+# Maps
+
+```{r}
+library(tigris)  
+library(sf)
+library(leaflet)
+  
+us <- states(cb = TRUE)  
+drop_states <- c("Commonwealth of the Northern Mariana Islands", 
+                 "United States Virgin Islands",
+                 "Alaska", "Hawaii", "American Samoa", "Guam", "Puerto Rico")
+
+us2 <- us %>%
+    filter(!NAME %in% drop_states) %>%
+    st_set_crs("4326")
+
+```
+
+
+
+```{r}
+## top states per style
+top_styles <- top_beers3 %>%
+    count(broad_style, sort = TRUE) %>%
+    top_n(9)
+
+beer_state_styles <- top_beers3 %>%
+    group_by(broad_style, state) %>%
+    summarize(n_beers = n(),
+              n_over4 = sum(avg >= 4, na.rm = TRUE),
+              n_over90 = sum(score >= 90, na.rm = TRUE),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    filter(broad_style %in% top_styles$broad_style) %>%
+    right_join(us2, by = c("state" = "NAME")) %>%
+    st_sf(sf_column_name = "geometry", crs = 4326)
+    
+
+maps <- map(top_styles$broad_style, ~ ggplot(beer_state_styles) + 
+    geom_sf() +
+    geom_sf(data = beer_state_styles %>% filter(broad_style == .x), 
+            aes(fill = n_over4)) +
+    scale_fill_viridis_b(direction = -1) + 
+    theme_void() +
+    ggtitle(.x))
+
+
+maps2 <- map(top_styles$broad_style, ~ ggplot(beer_state_styles) + 
+    geom_sf() +
+    geom_sf(data = beer_state_styles %>% filter(broad_style == .x), 
+            aes(fill = n_over90)) +
+    scale_fill_viridis_b(direction = -1) + 
+    theme_void() +
+    ggtitle(.x))
+
+ggsave(wrap_plots(maps), file = "maps.png", width = 16/1.2, height = 9/1.2)
+ggsave(wrap_plots(maps2), file = "maps2.png", width = 16/1.2, height = 9/1.2)
+
+```
+
+
+![States With the Most Beers with an Avg Rating > 4](maps.png) 
+
+
+![States With the Most Beers with a BA Score > 90](maps2.png) 
+
+
+
+
+```{r}
+## leaflet map - Pilsners
+
+make_leaflet <- function(style) { 
+  
+style_scores <- top_beers3 %>%
+    filter(broad_style == style) %>%
+    group_by(state) %>%
+    summarize(n_beers = n(),
+              n_over4 = sum(avg >= 4, na.rm = TRUE),
+              n_over90 = sum(score >= 90, na.rm = TRUE),
+              avg_rating = round(mean(avg, na.rm = TRUE), 2)) %>%
+    left_join(top_beers3 %>%
+        filter(broad_style == style) %>%
+        group_by(state) %>%
+        slice_max(order_by = avg, n = 1) %>%
+        mutate(name = paste(brewery, name, sep = ": ")) %>%
+        select(top_beer = name)) %>%
+    right_join(us2, by = c("state" = "NAME")) %>%
+    st_sf(sf_column_name = "geometry", crs = 4326)
+
+
+pal <- colorBin("viridis", style_scores$n_over90, pretty = TRUE, reverse = TRUE)
+
+
+leaflet(style_scores) %>%
+  addProviderTiles(providers$Stamen.TonerLite,
+                   options = providerTileOptions(minZoom = 2, maxZoom = 5)) %>%
+  addPolygons(fillColor = ~ pal(n_over90),
+              weight = 0.5, opacity = 1,
+              color = "black",
+              fillOpacity = 0.5, smoothFactor = 0.5,
+              label = paste0("N reviews > 4 = ", style_scores$n_over4, ", ",
+                             "N scores > 90 = ", style_scores$n_over90, ", ",
+                              "Avg Rating = ", style_scores$avg_rating, ", ",
+                             "Top beer: ", style_scores$top_beer)) %>%
+  setView(-98.5795, 39.8282, zoom=3)
+
+}
+
+make_leaflet("Pilsner")
+
+
+```
+
+
+Best place for an IPA:
+
+```{r}
+make_leaflet("IPA")
+```
+
+
+
+

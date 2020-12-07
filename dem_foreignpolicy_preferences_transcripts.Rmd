@@ -11,12 +11,17 @@ This project is intended to analyze the 2020 Democratic Presidential candidates'
 We'll start off by creating a tibble of the transcripts of the debates, with a row for each response given by a candidate. 
 
 I scraped the transcripts from various sources, because no single source seemed to have transcripts for every debate. Unfortunately, that meant that the regex varied by debated, and so creating a function to automate this process would be much more difficult. 
+
 ```{r message=FALSE}
 library(tidyverse)
 library(rvest)
 library(httr)
 library(lubridate)
 library(tidytext)
+library(tidylo)
+library(tidymodels)
+library(textrecipes)
+
 ```
 
 ```{r message=FALSE}
@@ -31,6 +36,12 @@ debate1_1 <- debate1_1 %>%
     separate_rows(transcript, sep = "[\\?\\.\\)\\’a-z](?=[A-Z]{2,})") %>%
     separate(transcript, sep = "\\:", into = "speaker", remove = FALSE)
 
+```
+
+
+I'll hide the rest of the scraping code since it's long and repetitive, but the idea is to repeat the above process for each debate, combine each dataframe, then do a little final cleaning.
+
+```{r include=FALSE}
 
 ## Debate 1 pt 2 - Miami
 html <- read_html("https://www.nytimes.com/2019/06/28/us/politics/transcript-debate.html")
@@ -173,7 +184,6 @@ debate11 <- debate11 %>%
     separate_rows(transcript, sep = "[\\.\\?\\]\\-](?=[A-Z\\sa-z]+(W.)?:\\s\\()") %>%
     separate_rows(transcript, sep = "[\\.\\?\\]](?=Ilia Calderón:)") %>%
     separate(transcript, sep = "\\:", into = "speaker", remove = FALSE) 
-
 ## Combine all debates
 all_debates <- bind_rows(debate1_1, debate1_2, debate2_1, debate2_2, debate3, debate4,
                          debate5, debate6, debate7, debate8, debate9, debate10, debate11) 
@@ -221,9 +231,10 @@ all_debates <- all_debates %>%
 
 candidates_only <- all_debates %>%
     filter(candidate == 1) %>%
-    mutate(transcript = str_remove(transcript, "^[\\w\\:]+\\s")) %>%
-    mutate(transcript = str_remove(transcript, "BLASIO: ")) %>%
-    mutate(transcript = str_remove(transcript, "O$")) %>%
+    mutate(transcript = str_remove(transcript, "^[\\w\\:]+\\s"),
+           transcript = str_remove(transcript, "BLASIO: "),
+           transcript = str_remove(transcript, "O$"),
+           line_id = paste0("id_", row_number())) %>%
     select(-candidate)
 
 candidates_only %>%
@@ -231,87 +242,490 @@ candidates_only %>%
 
 ```
 
-So now we've got a tibble with the transcript, the candidate, and the debate number.
+So now we've got a tibble called "candidates_only" with the transcript, the candidate, and the debate number. Here's what it looks like:
+
+```{r}
+candidates_only %>%
+    glimpse()
+```
+
 
 # Words by candidate
 Next we can use the tidytext package to transform the dataframe so that rows contain a single word spoken by that candidate. We'll remove stopwords using tidytext, and then remove a few additional words, including contractions and the names of candidates.
 
-Then we can create a chart that shows the most common words spoken by each candidate. 
+Then we can use the tidylo package to see the weighted log odds of each candidate using a particular word. 
 
 ```{r}
+
+custom_stopwords <- c("it's", "biden", "steyer", "harris", "warren",
+                      "buttigieg","klobuchar", "booker", "yang", "sanders", "that's",
+                      "i'm", "it’s", "i’m", "01", "people", "12", "that’s", "we’re", 
+                      "02", "don’t", "we’ve", "bloomberg", "time", "Senator",
+                      "america", "country", "president", "bring", "american",
+                      "pete", "bernie", "elizabeth", "mike", "cory", "joe",
+                      "kamala", "amyklobuchar.com", "amy", "warre", 
+                      "peteforamerica.com", "ilia", "calderón")
+
 candidates_words <- candidates_only %>%
     unnest_tokens(word, transcript) %>%
     anti_join(stop_words, by = c("word" = "word")) %>%
-    filter(!word %in% c("it's", "biden", "steyer", "harris", "warren", "buttigieg", "klobuchar",
-                     "booker", "yang", "sanders", "that's", "i'm", "it’s", "i’m", "01",
-                     "people", "12", "that’s", "we’re", "02", "don’t", "we’ve", "bloomberg",
-                     "america", "country", "president", "bring", "american")) 
+    filter(!word %in% custom_stopwords) 
+
+
 
 candidates_words %>%
-    group_by(speaker, word) %>%
-    summarize(n = n()) %>%
-    ungroup() %>%
+    filter(speaker %in% c(
+      "Joe Biden", "Bernie Sanders", "Elizabeth Warren", "Pete Buttigieg",
+      "Amy Klobuchar", "Cory Booker", "Kamala Harris", 
+      "Mike Bloomberg")) %>%
+    add_count(speaker, name = "total_words") %>%
     group_by(speaker) %>%
-    top_n(5, n) %>%
+    count(word, sort = TRUE) %>%
+    mutate(word = str_remove_all(word, "[:punct:]")) %>%
+    bind_log_odds(set = speaker, feature = word, n = n) %>%
+    group_by(speaker) %>%
+    top_n(8) %>%
     ungroup() %>%
-    filter(speaker %in% c("Joe Biden", "Bernie Sanders", "Elizabeth Warren", "Pete Buttigieg",
-                          "Amy Klobuchar", "Cory Booker", "Kamala Harris", 
-                          "Mike Bloomberg")) %>%
-    mutate(word = reorder_within(word, n, speaker)) %>%
-    ggplot(aes(y = word, x = n, fill = speaker)) +
-    geom_col(show.legend = FALSE) + 
-    labs(x = NULL) +
+    mutate(word = factor(word), 
+           word = reorder_within(word, log_odds_weighted, speaker)) %>% 
+    ggplot(aes(x = log_odds_weighted, y = word, fill = speaker)) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~speaker, scales = "free_y") +
     scale_y_reordered() + 
-    facet_wrap(~ speaker, scales = "free", ncol = 2) +
-    ggthemes::theme_fivethirtyeight()
-  
-ggsave("candidate_word_count.png", heigh = 9/1.2, width = 16/1.2)
+    theme_minimal()
+
+
+
 ```
 
 I'm pretty happy with how this turned out, as these seem to capture the primary messages of each candidate:
 
-* Amy Klobuchar's debate message was focused on Trump (Trump and Donald were her second- and third-most spoken words), while highlighting her ability to pass bipartisan legislation (her most frequently-spoken word being "bill").
-* Bernie Sanders' top word was, fittingly, "healthcare." The words "industry" and "million" shouldn't be surprising either, as they are likely used in his criticisms of the pharmaceutical and healthcare industries. Notably, the inclusion of "joe" reflects his friendliness with Joe Biden as well as the fact that the last debate was only between the two of them. 
-* Cory Booker's campaign tried to focus on optimism, hope, and unity, and that is captured by "united" being his top word by a significant margin. 
-* Elizabeth Warren's top five words are strongly representative of her message of fighting for the middle class. "Fight" was her most frequently-spoken word, while kitchen-table issues like "healthcare", "money", and "family" round out her top five. 
-* Biden's deal-making and bipartisan nature are evident in his top five, which includes "united" and "deal." Interestingly, he's one of the few candidates to both have, and emphasize, his foreign policy experience, which could be signaled by the inclusion of "world" in his top five. 
-* Kamala Harris highlighted issues related to racial justice and womens' rights in her campaign. 
-* Mike Bloomberg only joined the debates at the end, and his top five is mostly focused on mentions of New York City. The inclusion of "Senator" likely refers to his responses to Senator Warren. 
-* Finally, Pete Buttigieg's top five suggests his campaign message of a new generation of leadership in Washington, while also noting his experience as a veteran. 
+
+* Bernie Sanders' top word was, fittingly, "greed", likely directed at large corporations ("*It’s not just the price fixing and the corruption and the greed of the pharmaceutical industry, it’s what’s going on in the fossil fuel industry. It’s what’s going on in Wall Street. It’s what’s going on with the prison industrial complex. We need a mass political movement.*") "Industry" and "uninsured" shouldn't be surprising either, as they are likely used in his criticisms of the pharmaceutical and healthcare industries. 
+* Cory Booker's campaign tried to focus on optimism, hope, and unity, and that is captured by "purpose" being his top word by a significant margin. 
+* Elizabeth Warren's top words are strongly representative of her message of fighting for the middle class. "Giant" was her most distinctive word -- "*So I think of it this way, who is this economy really working for? It’s doing great for a thinner and thinner slice at the top. It’s doing great for giant drug companies.*" -- while her "two-**cent** wealth tax" made a lot of appearances as well. "Cancel" refers to her plan to cancel student loan debt.
+* Biden made significant use of his experience as Vice-President, refering frequently to the broadly (and increasingly) popular "Obamacare" and his relationship with President Obama.
+* Mike Bloomberg only joined the debates at the end, and his log odds words list mostly focused on mentions of New York City. The inclusion of "Senator" likely refers to his responses to Senator Warren. 
 
 
-That was pretty interesting, and I'll add more analysis later on! 
+# Modeling which candidate said a particular line in the debates
+OK, now let's build a model to predict which of the top 8 candidates said a particular line in the debates. Are the candidates' debate arguments distinct from one another enough to build a model around? We'll see! 
 
-# Biden
+First, do a little more cleaning and EDA before we model. First, we want to filter out any short lines, like interruptions that only contain a few words. So we'll tokenize the text, add a column with word counts per debate line, and then filter for any below 25. 
+
+Then we'll take a look at the distributions of word counts per candidate lines (which also shows who talked the most in the debates!).
+
+Finally, we'll get the total number of lines spoken per candidate. Biden and Bernie have the most, in large part to their extra debate together. 
 
 ```{r}
-biden <- all_debates %>%
-    filter(speaker == "Joe Biden")
+library(tokenizers)
+
+
+candidates_only2 <- candidates_only %>% 
+    filter(speaker %in% c(
+      "Joe Biden", "Bernie Sanders", "Elizabeth Warren", "Pete Buttigieg",
+      "Amy Klobuchar", "Cory Booker", "Kamala Harris", 
+      "Mike Bloomberg")) %>% 
+    mutate(n_words = tokenizers::count_words(transcript)) %>%
+    filter(n_words > 25)
+
+
+## histogram
+candidates_only2 %>%
+    ggplot(aes(n_words, fill = speaker)) +
+    geom_histogram() +
+    theme(legend.position = "none") + 
+    facet_wrap(~speaker) 
+
+
+candidates_only2 %>%
+    count(speaker) %>%
+    ggplot(aes(n, reorder(speaker, n), fill = speaker)) +
+    geom_col() +
+    theme(legend.position = "none")
+    
+
+```
+
+Now we can move on to the modeling itself. We'll create training and testing data, then define a preprocessing recipe that filters our stop words as well as the custom stopwords list I used above. I upsample because there's a significant difference between the number of lines spoken by Biden at the top and Bloomberg at the bottom. 
+
+We'll start off with a regularized glmnet model, tuning for the number of tokens and the penalty used for regularization. It uses n-grams of two tokens as well. I also did an xgboost model, but I won't actually run that code for this post, because it took nearly 25 hours to run *shocked emoji* and actually performed a little worse than the glmnet model below.
+
+```{r}
+
+candidates_only3 <- candidates_only2 %>%
+    select(line_id, speaker, transcript)
+
+set.seed(123)
+candidates_split <- initial_split(candidates_only3)
+candidates_train <- training(candidates_split)
+candidates_test <- testing(candidates_split)
+candidates_folds <- vfold_cv(candidates_train, folds = 10, strata = speaker)
+
+
+glmnet_recipe <- recipe(speaker ~ ., data = candidates_train) %>%
+    update_role(line_id, new_role = "id") %>%
+    step_string2factor(speaker) %>%
+    step_tokenize(transcript) %>%
+    step_stopwords(transcript) %>%
+    step_stopwords(transcript, custom_stopword_source = custom_stopwords) %>% 
+    step_ngram(transcript, num_tokens = 2, min_num_tokens = 1) %>%
+    step_tokenfilter(transcript, max_tokens = tune::tune(), min_times = 10) %>%
+    step_tfidf(transcript) %>%
+    step_normalize(recipes::all_predictors()) %>%
+    themis::step_upsample(speaker)
+
+glmnet_spec <-  multinom_reg(penalty = tune(), mixture = 1) %>% 
+    set_mode("classification") %>% 
+    set_engine("glmnet") 
+
+glmnet_workflow <- workflow() %>% 
+    add_recipe(glmnet_recipe) %>% 
+    add_model(glmnet_spec) 
+
+glmnet_grid <- grid_max_entropy(
+    penalty(range = c(-4, 0)),
+    max_tokens(),
+    size = 25)
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- parallel::makePSOCKcluster(all_cores)
+doParallel::registerDoParallel(cl)
+set.seed(1234)
+
+glmnet_tune <- tune_grid(
+    glmnet_workflow, 
+    resamples = candidates_folds, 
+    grid = glmnet_grid,
+    metrics = metric_set(accuracy, roc_auc),
+    control = control_grid(save_pred = TRUE, pkgs = c('textrecipes'))) 
+
 
 ```
 
 
-# Moderator questions
-```{r}
-moderators <- all_debates %>%
-    filter(candidate == 0)
+Here's the code for the glmnet, in case you're interested:
 
-moderator_questons <- moderators %>%
-    filter(str_detect(transcript, "\\?"))
+```{r eval = FALSE}
+xgboost_recipe <- recipe(formula = speaker ~ ., data = candidates_train) %>% 
+    update_role(line_id, new_role = "id") %>%
+    step_string2factor(speaker) %>%
+    step_tokenize(transcript) %>%
+    step_stopwords(transcript) %>%
+    step_stopwords(transcript, custom_stopword_source = custom_stopwords) %>% 
+    step_ngram(transcript, num_tokens = 2, min_num_tokens = 1) %>%
+    step_tokenfilter(transcript, max_tokens = tune::tune(), min_times = 10) %>%
+    step_tfidf(transcript) %>%
+    step_normalize(recipes::all_predictors()) %>%
+    themis::step_upsample(speaker)
+
+
+xgboost_spec <- boost_tree(
+    trees = 1000,
+    min_n = tune(), 
+    tree_depth = tune(), 
+    learn_rate = tune(), 
+    loss_reduction = tune(), 
+    sample_size = tune()) %>% 
+    set_mode("classification") %>% 
+    set_engine("xgboost") 
+
+
+
+xgb_grid <- xgboost_spec %>%
+    parameters() %>%
+    grid_latin_hypercube(size = 20)
+
+
+xgboost_workflow <- workflow() %>% 
+    add_recipe(xgboost_recipe) %>% 
+    add_model(xgboost_spec) 
+
+all_cores <- parallel::detectCores(logical = FALSE)
+cl <- parallel::makePSOCKcluster(all_cores)
+doParallel::registerDoParallel(cl)
+
+tictoc::tic()
+set.seed(72008)
+
+xgboost_tune <- tune_race_anova(
+    xgboost_workflow,
+    resamples = candidates_folds,
+    grid = xgb_grid,
+    metrics = metric_set(accuracy, roc_auc),
+    control = control_grid(save_pred = TRUE, pkgs = c("textrecipes")))
+
+
+tictoc::toc()
+beepr::beep(2)
+
+
+show_best(xgboost_tune, "accuracy")
+show_best(xgboost_tune, "roc_auc")
+
+xgb_pred <- collect_predictions(xgboost_tune)
+
+xgb_pred %>%
+    filter(id == "Fold01") %>%
+    conf_mat(speaker, .pred_class) %>%
+    autoplot(type = "heatmap")
+
+
 
 ```
 
 
 
-# China mentions
+
 
 ```{r}
-all_debates %>%
-    filter(str_detect(transcript, "China") & candidate == 1) %>%
-    group_by(speaker) %>%
-    summarize(china_mention = n()) %>%
-    arrange(desc(china_mention))
+show_best(glmnet_tune, "accuracy")
+show_best(glmnet_tune, "roc_auc")
+
+lasso_pred <- collect_predictions(glmnet_tune)
+
+
+best_roc <- select_best(glmnet_tune, "roc_auc")
+lasso_wf_final <- finalize_workflow(glmnet_workflow, best_roc)
+
+
+## variable importance
+library(vip)
+
+lasso_wf_final %>%
+    fit(candidates_train) %>%
+    pull_workflow_fit() %>%
+    vi(lambda = best_roc$penalty) %>%
+    slice_head(n = 25) %>%
+    mutate(Importance = abs(Importance),
+           Variable = str_remove(Variable, "tfidf_transcript_"),
+           Variable = fct_reorder(Variable, Importance)) %>%
+    ggplot(aes(Importance, Variable, fill = Sign)) +
+    geom_col() +
+    theme_classic() +
+    labs(x = NULL, y = NULL)
+
 ```
+
+So, not *amazing* performance, but this is a difficult problem with 8 classes and not a ton of observations. 
+
+But the variable importance plot is interesting. "Thank (you,) Senator" is the most important n-gram, followed closely by "think". "Think" was used overwhelmingly by Amy Klobuchar (98 times), followed by Bernie (81). 
+
+``` {r}
+## final model, evaluate with test data
+final_res <- lasso_wf_final %>%
+    last_fit(candidates_split, metrics = metric_set(accuracy, roc_auc))
+
+collect_metrics(final_res)
+
+
+final_res %>%
+    collect_predictions() %>%
+    conf_mat(speaker, .pred_class) %>%
+    autoplot(type = "heatmap") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+
+The good news is that we didn't overfit, even if our test accuracy was still just 57%. But the confusion matrix was pretty solid nevertheless, mostly getting the right person for each test line. 
+
+
+# What did candidates talk about? 
+We can also do a little LDA to see what the candidates talked about. We cast our previous dataframe as a document-term matrix, then run LDA, collecting the beta probabilities for words in each of the three topics we'll look at. 
+
+```{r}
+library(topicmodels)
+
+candidates_dtm <- candidates_only3 %>%
+    rename(text = transcript) %>%
+    unnest_tokens(word, text) %>%
+    anti_join(stop_words, by = "word") %>%
+    anti_join(tibble(word = custom_stopwords)) %>%
+    count(speaker, word, sort = TRUE) %>%
+    cast_dtm(speaker, word, n)
+
+candidates_lda <- LDA(candidates_dtm, k = 3, control = list(seed = 123))
+
+
+
+candidates_topics <- candidates_lda %>%
+    tidy(matrix = "beta")
+
+
+candidates_top_terms <- candidates_topics %>%
+    group_by(topic) %>%
+    top_n(10, abs(beta)) %>%
+    ungroup() %>%
+    arrange(topic, desc(beta))
+
+
+candidates_top_terms %>%
+    mutate(term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free") +
+    scale_y_reordered()
+
+```
+
+I don't know exactly what I expected, but there don't seem to be huge differences between the three topics. "Plan", "Trump", "healthcare", and "united" are common to all topics.
+
+* However, topic one might be the Elizabeth Warren topic, as it's distinguished by words like "I have a **plan** for that", "healthcare", "pay" and "money", and "fight." 
+* Topic two might be about Trump and Democrats' arguments about his failures in health insurance policy. 
+* Topic three is also about Trump, but seems to me to be more Biden-ish, with words like "deal", "world", and "bill". 
+
+
+
+
+
+# Keras 
+
+```{r}
+library(keras)
+
+one_hot_train_labels <- candidates_train %>%
+    select(speaker) %>%
+    mutate(speaker = as.numeric(as.factor(speaker)) -1) %>%
+    pull(speaker) %>%
+    to_categorical()
+
+one_hot_test_labels <- candidates_test %>%
+    select(speaker) %>%
+    mutate(speaker = as.numeric(as.factor(speaker)) -1) %>%
+    pull(speaker) %>%
+    to_categorical()
+
+
+max_words <- 6900
+max_length <- 250
+
+prepped_recipe <- recipe( ~ transcript, data = candidates_train) %>%
+    step_tokenize(transcript) %>%
+    #step_stopwords(transcript) %>%
+    #step_stopwords(transcript, custom_stopword_source = custom_stopwords) %>% 
+    #step_ngram(transcript, num_tokens = 2, min_num_tokens = 1) %>%
+    step_tokenfilter(transcript, max_tokens = max_words) %>%
+    #themis::step_upsample(speaker) %>%
+    step_sequence_onehot(transcript, sequence_length = max_length,
+                         prefix = "", padding = "post", truncating = "post") %>%
+    prep()
+
+prepped_training <- prepped_recipe %>%
+  bake(new_data = NULL, composition = "matrix")
+
+```
+
+
+
+```{r}
+dense_model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_words + 1,
+                  output_dim = 12,
+                  input_length = max_length) %>%
+  layer_flatten() %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 8, activation = "softmax")
+
+
+dense_model %>% compile(
+    optimizer = "rmsprop",
+    loss = "categorical_crossentropy",
+    metrics = c("accuracy"))
+
+
+```
+
+
+```{r}
+dense_history <- dense_model %>% fit(
+  x = prepped_training,
+  y = one_hot_train_labels,
+  batch_size = 512,
+  epochs = 60,
+  validation_split = 0.2)
+
+plot(dense_history)
+
+dense_history$metrics
+
+```
+
+
+
+
+```{r}
+dense_model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_words + 1,
+                  output_dim = 12,
+                  input_length = max_length) %>%
+  layer_flatten() %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 8, activation = "softmax")
+
+
+dense_model %>% compile(
+    optimizer = "rmsprop",
+    loss = "categorical_crossentropy",
+    metrics = c("accuracy"))
+
+
+dense_history <- dense_model %>% fit(
+  x = prepped_training,
+  y = one_hot_train_labels,
+  batch_size = 512,
+  epochs = 36,
+  validation_split = 0.2)
+
+plot(dense_history)
+
+```
+
+
+
+
+```{r}
+library(janitor)
+
+
+results <- dense_model %>%
+    evaluate(bake(prepped_recipe, candidates_test, composition = "matrix"),
+             one_hot_test_labels)
+
+colnames_keras <- candidates_train %>%
+    select(speaker) %>%
+    mutate(speaker2 = as.numeric(as.factor(speaker)) -1) %>%
+    distinct() %>%
+    arrange(speaker2) %>%
+    pull(speaker)
+
+keras_preds <- dense_model %>%
+    predict(prepped_training) %>%
+    as_tibble() 
+
+colnames(keras_preds) <- colnames_keras 
+
+colnames_keras2 <- tibble(pred_class = colnames_keras) %>%
+    mutate(speaker_num = rep(1:8))
+
+
+keras_preds <- keras_preds %>% 
+    rownames_to_column("id") %>%
+    bind_cols(candidates_train %>% select(speaker)) %>% 
+    rowwise() %>%
+    mutate(speaker_num = which.max(c_across(2:9))) %>%
+    left_join(colnames_keras2) 
+
+keras_preds %>%
+    mutate(speaker = as.factor(speaker),
+           pred_class = as.factor(pred_class)) %>%
+    conf_mat(truth = speaker, estimate = pred_class) %>%
+    autoplot(type = "heatmap")
+
+
+```
+
 
 
 
