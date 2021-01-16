@@ -1,0 +1,190 @@
+---
+title: "County Data"
+author: "Chad Peltier"
+date: "1/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Other data sources
+* https://www.ers.usda.gov/data-products/atlas-of-rural-and-small-town-america/
+* http://ghdx.healthdata.org/us-data
+* https://www.census.gov/programs-surveys/gov-finances.html
+* https://www.countyhealthrankings.org/
+* https://chronicdata.cdc.gov/browse?category=500+Cities+%26+Places&sortBy=newest&utf8
+* https://chronicdata.cdc.gov/500-Cities-Places/PLACES-Local-Data-for-Better-Health-County-Data-20/swc5-untb
+
+
+
+```{r}
+library(tidyverse)
+library(tidycensus)
+library(sf)
+library(readxl)
+library(janitor)
+library(GGally)
+```
+
+
+## Libraries data
+
+Libraries: https://www.imls.gov/sites/default/files/2018_pls_data_file_documentation.pdf
+CDC health data: https://chronicdata.cdc.gov/500-Cities-Places/PLACES-Local-Data-for-Better-Health-County-Data-20/swc5-untb 
+
+```{r}
+# census_vars <- load_variables(2018, "acs5", cache = TRUE)
+
+states <- tibble(state.abb, state.name, state.region)
+
+## libraries
+libraries <- read_csv("C:\\Users\\ChadPeltier\\Downloads\\pls_fy2018_data_files_csv\\pls_fy18_ae_pud18i.csv") %>%
+    clean_names() 
+
+libraries2 <- libraries %>%
+    mutate(tot_lib = centlib + branlib) %>%
+    group_by(cnty, stabr) %>%
+    summarize(tot_lib = sum(tot_lib),
+              librarians = sum(libraria),
+              salaries = sum(salaries)) %>%
+    mutate(cnty = paste0(cnty, " County"),
+           cnty = str_to_title(cnty),
+           cnty = case_when(str_detect(cnty, "Dekalb") ~ "DeKalb County",
+                            cnty == "Dupage County" ~ "DuPage County",
+                            cnty == "Baltimore City County" ~ "Baltimore city",
+                            TRUE ~ NA_real_)) %>%
+    left_join(states, by = c("stabr" = "state.abb"))
+
+
+
+
+
+```
+
+
+## ACS Data
+
+```{r}
+
+## acs
+acs <- get_acs(geography = "county",
+           variables = c(tot_pop = "B01003_001", 
+                         age_male = "B01002_002",
+                         age_female = "B01002_003",
+                         ba = "B15003_022",
+                         ma = "B15003_023",
+                         pd = "B15003_024",
+                         phd = "B15003_025", 
+                         poverty = "B17001_001",
+                         medicaid = "C27007_001",
+                         tot_white = "B02001_002",
+                         tot_black = "B02001_003"),
+            year = 2018)
+
+acs2 <- acs %>%
+    clean_names() %>%
+    pivot_wider(names_from = variable, values_from = estimate, id_cols = name) %>%
+    left_join(acs %>% 
+                  clean_names() %>%
+                  separate(name, into = c("county", "state"), 
+                           sep = ", ", remove = FALSE) %>%
+                  select(name, county, state)) %>%
+    relocate(state, county) %>%
+    distinct() %>%
+    mutate(county = str_replace(county, "Parish", "County"),
+           county = str_remove(county, " census area"),
+           medicaid_perc = medicaid / tot_pop,
+           pov_perc = poverty / tot_pop,
+           college = ba + ma + pd + phd, 
+           college_perc = college / tot_pop,
+           white_perc = tot_white / tot_pop,
+           black_perc = tot_black / tot_pop)
+```
+
+
+## Election data
+https://github.com/tonmcg/US_County_Level_Election_Results_08-20/blob/master/2016_US_County_Level_Presidential_Results.csv
+
+```{r}
+
+pres20 <- read_csv("https://github.com/tonmcg/US_County_Level_Election_Results_08-20/raw/master/2020_US_County_Level_Presidential_Results.csv") %>%
+    mutate(election = 2020) %>%
+    left_join(states, by = c("state_name" = "state.name")) %>%
+    rename(state.name = state_name)
+
+
+pres16 <- read_csv("https://github.com/tonmcg/US_County_Level_Election_Results_08-20/raw/master/2016_US_County_Level_Presidential_Results.csv") %>%
+    left_join(states, by = c("state_abbr" = "state.abb")) %>%
+    mutate(per_point_diff = parse_number(per_point_diff),
+           per_point_diff = per_point_diff / 100,
+           election = 2016,
+           state.name = if_else(county_name == "District of Columbia", 
+                           "District of Columbia", state.name)) %>%
+    select(-X1, -combined_fips) %>%
+    distinct()
+
+
+pres <- pres20 %>%
+    bind_rows(pres16) %>%
+    mutate(election = paste0("dem_perc", election),
+           state_county = paste(state.name, county_name, sep = "_")) %>%
+    pivot_wider(names_from = election, values_from = c(per_dem, total_votes), id_cols = state_county) %>%
+    rename(total_votes20 = 4, total_votes16 = 5,
+           dem_perc20 = 2, dem_perc16 = 3) %>%
+    separate(state_county, into = c("state", "county"), sep = "_") %>%
+    mutate(dem_dif = dem_perc20 - dem_perc16,
+           total_votes_dif = total_votes20 - total_votes16,
+           county = str_replace(county, "Parish", "County"))
+```
+
+
+
+## Combine all dfs
+
+```{r}
+### Fix county name problems
+
+combined <- libraries2 %>%
+    left_join(acs2, by = c("state.name" = "state", "cnty" = "county")) %>%
+    left_join(pres, by = c("state.name" = "state", "cnty" = "county")) %>%
+    mutate(turnout20 = total_votes20 / tot_pop,
+           turnout16 = total_votes16 / tot_pop,
+           turnout_dif = turnout20 - turnout16)
+
+combined %>%
+    filter(is.na(name)) %>%
+    View()
+```
+
+## EDA
+
+```{r}
+combined %>%    
+    ungroup() %>%
+    filter(!is.na(name)) %>%
+    select(tot_lib, salaries, pov_perc, college_perc, per_dem, turnout) %>%
+    ggpairs()
+  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
