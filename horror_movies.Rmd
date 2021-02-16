@@ -1,0 +1,771 @@
+---
+title: "Horror Movies"
+author: "Chad Peltier"
+date: "2/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Scrape IMDB
+
+```{r message=FALSE}
+library(tidyverse)
+library(httr)
+library(rvest)
+library(janitor)
+library(furrr)
+library(tidymodels)
+library(textrecipes)
+library(tidytext)
+library(widyr)
+library(corrr)
+library(lubridate)
+```
+
+## Get IMDB IDs
+
+```{r eval=FALSE}
+
+## make function
+get_imdb_id <- function(page){
+  
+    read_html(paste0("https://www.imdb.com/search/title/?title_type=feature&num_votes=25000,&genres=horror&sort=user_rating,desc&start=", page, "&ref_=adv_nxt")) %>%
+    html_nodes("a") %>%
+    html_attr("href") %>%
+    tibble(links = .) %>%
+    filter(str_detect(links, "title/tt")) %>%
+    mutate(links = str_extract(links, "tt\\d+")) %>%
+    distinct() 
+}
+
+
+## scrape all pages 
+pages <- seq(from = 1, to = 700, by = 50)
+
+horror_ids <- map_dfr(pages, get_imdb_id) 
+
+```
+
+## Scrape movie pages
+
+```{r eval=FALSE}
+
+url <- "https://www.imdb.com/title/tt1073105/"
+
+get_imdb <- function(url){
+    title <- read_html(url) %>%
+        html_nodes("h1") %>%
+        html_text() %>%
+        tibble("title" = .) %>%
+        mutate(year = str_extract(title, "\\d{4}"),
+               title = str_squish(str_remove(title, "\\(\\d+\\)")))
+    
+    rating <- read_html(url) %>%
+        html_nodes(".ratings_wrapper") %>%
+        html_text() %>%
+        tibble(imdb_rating = .) %>%
+        mutate(imdb_rating = str_extract(imdb_rating, "\\d\\.\\d(?=\\/10)"))
+    
+    time <- read_html(url) %>%
+        html_nodes("time") %>%
+        html_text() %>%
+        tibble(time = .)
+    
+    summary <- read_html(url) %>%
+        html_nodes(".plot_summary") %>%
+        html_text() %>%
+        tibble("summary" = .) %>% 
+        mutate(summary = str_trim(summary),
+               summary = str_remove_all(summary, "[\r\n\t]"),
+               directors = str_trim(str_extract(summary, "(?<=Directors{0,1}:)[\\w\\,\\s\\.]+")),
+               writers = str_trim(str_extract(summary, "(?<=Writers{0,1}:)[\\w\\s\\,\\.]+")),
+               directors = str_remove(directors, "\\s{2,}.+"),
+               writers = str_remove(writers, "\\s{2,}.+"),
+               stars = str_trim(str_extract(summary, "(?<=Stars:)[\\w\\s\\,\\.]+")),
+               summary = str_remove(summary, "\\s{2,}Director.+"))  
+    
+    score <- read_html(url) %>%
+        html_nodes(".metacriticScore") %>%
+        html_text() %>%
+        tibble("metacritic_score" = .) %>%
+        mutate(metacritic_score = str_remove_all(metacritic_score, "[\r\n\t]"))
+    
+    story <- read_html(url) %>%
+        html_nodes("#titleStoryLine") %>%
+        html_text() %>%
+        tibble("story" = .) %>%
+        mutate(story = str_squish(str_remove_all(story, "[\r\n\t]")),
+               genres = str_extract(story, "(?<=Genres{0,1}: )[\\w\\s\\|\\-]+"),
+               genres = str_remove(genres, "Certificate"),
+               genres = str_remove(genres, "Motion Picture Rating"),
+               story = str_remove(story, "Edit Storyline "),
+               story = str_remove(story, "Plot Summary.+"),
+               story = str_remove(story, "Written by.+")) 
+    
+    id <- tibble(id = str_extract(url, "tt\\d+"))
+    
+    details <- read_html(url) %>%
+        html_nodes("#titleDetails") %>%
+        html_text() %>%
+        tibble("details" = .) %>%
+        mutate(gross_usa = parse_number(str_extract(details, "(?<=Gross USA: \\$)[\\d\\,]+")),
+               gross_world = parse_number(str_extract(details, "(?<=Cumulative Worldwide Gross: )[\\$\\d\\,]+")),
+               runtime = str_extract(details, "(?<=Runtime:\\s{9})\\d+"),
+               language = str_extract(details, "(?<=Language:\\s{9})\\w+")) %>%
+        select(-details) 
+    
+    if(nrow(score)==0){score <- tibble(metacritic_score = NA_character_)}
+
+    bind_cols(id, title, rating, score, details, summary, story)
+    
+}
+  
+possibly_get_imdb <- possibly(get_imdb, NULL)
+
+
+## map across URLs
+horror_ids2 <- horror_ids %>%
+    mutate(links = paste0("https://www.imdb.com/title/", links, "/"))
+
+
+n_cores <- availableCores() - 2
+plan(multiprocess, workers = n_cores)
+
+horror_data <- future_map_dfr(horror_ids2$links,  possibly_get_imdb)
+
+
+```
+
+
+## Add keywords
+
+```{r eval=FALSE}
+url <- "https://www.imdb.com/title/tt0054215/keywords?ref_=tt_stry_kw"
+
+get_keywords <- function(url){
+  
+    id <- tibble(id = str_extract(url, "tt\\d+"))
+  
+    read_html(url) %>%
+      html_nodes(".sodatext") %>%
+      html_text() %>%
+      tibble("keywords" = .) %>%
+      summarize(keywords = str_squish(paste0(keywords, collapse = "|"))) %>%
+      bind_cols(id, .)
+
+}
+
+keyword_urls <- horror_ids %>%
+    mutate(links = paste0("https://www.imdb.com/title/", links, "/keywords"))
+
+
+horror_keywords <- map_dfr(keyword_urls$links, get_keywords)
+
+  
+## add back to horror_data
+horror2 <- left_join(horror_data, horror_keywords) %>%
+    distinct()
+  
+```
+
+
+## Dummy genre columns 
+
+```{r eval=FALSE}
+
+horror3 <- horror2 %>%
+    select(id, genres) %>%
+    mutate(genres = str_split(genres, " | ")) %>%
+    unnest(genres) %>%
+    filter(!genres %in% c("|", NA_character_, "")) %>%
+    mutate(count = "1") %>%
+    distinct() %>%
+    pivot_wider(names_from = genres, values_from = count, values_fill = "0", id_cols = id) %>% 
+    rename_with(.cols = 2:ncol(.), 
+                .fn = ~ str_to_lower(paste0("genre_", .))) %>%
+    left_join(horror2 %>% select(-genres), .) %>%
+    mutate(across(c(year, imdb_rating, metacritic_score, runtime), as.numeric))
+
+```
+
+
+
+
+```{r include=FALSE, eval=FALSE}
+horror_new <- horror3 %>%
+  recipe(~ year + imdb_rating + metacritic_score + gross_world + id , data = .) %>%
+  update_role(id, new_role = "id") %>%
+  step_knnimpute(metacritic_score, gross_world, neighbors = 3) %>%
+  prep() %>%
+  bake(new_data = NULL) %>%
+  select(-c(year, imdb_rating), id) %>%
+  left_join(horror3 %>% select(-c(metacritic_score, gross_world)), .)
+```
+
+
+# Cosine similarity
+
+```{r message=FALSE, eval=FALSE}
+
+horror_words <- horror3 %>%
+    select(id, keywords) %>%
+    unnest_tokens(word, keywords, token = "regex", pattern = " \\| ") %>%
+    filter(word != "reference") %>%
+    count(id, word, sort = TRUE) %>%
+    bind_tf_idf(word, id, n) %>%
+    arrange(desc(tf_idf))
+
+## tf_idf vs. tf ?
+horror_sim <- horror_words %>%
+    pairwise_similarity(id, word, tf_idf, upper = FALSE, sort = TRUE) %>%
+    left_join(horror3 %>% 
+                  select(id, title1 = title, imdb_rating1 = imdb_rating, keywords1 = keywords), 
+              by = c("item1" = "id")) %>%
+    left_join(horror3 %>% 
+                  select(id, title2 = title, imdb_rating2 = imdb_rating),
+              by = c("item2" = "id"))
+
+```
+
+
+```{r include=FALSE, eval=FALSE}
+
+write_csv(horror_new, file = "horror3.csv", na = "")
+write_csv(horror_sim %>% select(-keywords1), file = "horror_sim.csv", na = "")
+
+```
+
+
+```{rinclude=FALSE}
+
+horror3 <- read_csv("horror3.csv")
+horror_sim <- read_csv("horror_sim.csv") 
+```
+
+
+
+```{r}
+## function to visualize most similar movies
+make_similar_chart <- function(movie) {
+  
+  horror_sim %>%
+    filter(title1 == "Eraserhead") %>%
+    top_n(n = 10, wt = similarity) %>%
+    select(title1, title2, similarity, imdb_rating1, imdb_rating2) %>%
+    ggplot(aes(similarity, reorder(title2, similarity), fill = imdb_rating2)) +
+    geom_col() +
+    labs(y = "", fill = "IMDB Rating", title = paste("Similar Movies to", movie)) +
+    theme_classic()
+  
+}
+
+make_similar_chart("Erasehead")
+
+```
+
+
+
+
+
+```{r }
+
+## Words contributing to similarity scores
+word_similarities <- function(movie) {
+  tf_idf <- horror_words %>%
+      left_join(horror3 %>% select(id, title)) %>%
+      group_by(title) %>%
+      mutate(normalized = tf_idf / sqrt(sum(tf_idf ^ 2))) %>%
+      ungroup()
+  
+  word_combinations <- tf_idf %>%
+      filter(title == movie) %>%
+      select(-title) %>%
+      inner_join(tf_idf, by = "word", suffix = c("_movie", "_similar")) %>%
+      filter(title != movie) %>%
+      mutate(contribution = normalized_movie * normalized_similar) %>%
+      arrange(desc(contribution)) %>%
+      select(title, word, tf_idf_movie, tf_idf_similar, contribution)
+  
+  word_combinations %>%
+      filter(title %in% head(horror_sim %>% filter(title1 == movie) %>% pull(title2))) %>%
+      mutate(title = reorder(title, -contribution, sum),
+             word = reorder_within(word, contribution, title)) %>%
+      group_by(title) %>%
+      top_n(10, contribution) %>%
+      ungroup() %>%
+      mutate(word = reorder_within(word, contribution, title)) %>%
+      ggplot(aes(word, contribution, fill = title)) +
+      geom_col(show.legend = FALSE) +
+      scale_x_reordered() +
+      facet_wrap(~ title, scales = "free_y") +
+      coord_flip() +
+      labs(x = "",
+           y = "Contribution to similarity score") +
+      theme_light() +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+}
+
+
+word_similarities("Eraserhead")
+
+
+```
+
+
+
+
+```{r include=FALSE,eval=FALSE}
+## LDA
+
+ff_dtm <- ff_combined %>%
+    rename(text = line) %>% 
+    unnest_tokens(word, text) %>%
+    anti_join(stop_words, by = "word") %>%
+    count(track_name, word, sort = TRUE) %>%
+    cast_dtm(track_name, word, n)
+
+ff_lda <- LDA(ff_dtm, k = 5, control = list(seed = 123))
+
+
+
+ff_topics <- ff_lda %>%
+    tidy(matrix = "beta")
+
+
+ff_top_terms <- ff_topics %>%
+    group_by(topic) %>%
+    top_n(5, abs(beta)) %>%
+    ungroup() %>%
+    arrange(topic, desc(beta))
+
+
+ff_top_terms %>%
+    mutate(term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(beta, term, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free") +
+    scale_y_reordered()
+
+```
+
+
+
+
+
+```{r include=FALSE}
+
+customjs2 <- '
+function(el,x) { 
+    var link = d3.selectAll(".link")
+    var node = d3.selectAll(".node")
+
+    var options = { opacity: 1,
+                    clickTextSize: 10,
+                    opacityNoHover: 0.1,
+                    radiusCalculation: "Math.sqrt(d.nodesize)+6"
+                  }
+
+    var unfocusDivisor = 4;
+
+    var links = HTMLWidgets.dataframeToD3(x.links);
+    var linkedByIndex = {};
+    
+
+    links.forEach(function(d) {
+      linkedByIndex[d.source + "," + d.target] = 1;
+      linkedByIndex[d.target + "," + d.source] = 1;
+    });
+
+    function neighboring(a, b) {
+      return linkedByIndex[a.index + "," + b.index];
+    }
+
+    function nodeSize(d) {
+            if(options.nodesize){
+                    return eval(options.radiusCalculation);
+            }else{
+                    return 6}
+    }
+
+    function mouseover(d) {
+      var unfocusDivisor = 4;
+
+      link.transition().duration(200)
+        .style("opacity", function(l) { return d != l.source && d != l.target ? +options.opacity / unfocusDivisor : +options.opacity });
+
+      node.transition().duration(200)
+        .style("opacity", function(o) { return d.index == o.index || neighboring(d, o) ? +options.opacity : +options.opacity / unfocusDivisor; });
+
+      d3.select(this).select("circle").transition()
+        .duration(750)
+        .attr("r", function(d){return nodeSize(d)+5;});
+
+      node.select("text").transition()
+        .duration(750)
+        .attr("x", 13)
+        .style("stroke-width", ".5px")
+        .style("font", 24 + "px ")
+        .style("opacity", function(o) { return d.index == o.index || neighboring(d, o) ? 1 : 0; });
+        
+    }
+
+    function mouseout() {
+      node.style("opacity", +options.opacity);
+      link.style("opacity", +options.opacity);
+
+      d3.select(this).select("circle").transition()
+        .duration(750)
+        .attr("r", function(d){return nodeSize(d);});
+      node.select("text").transition()
+        .duration(1250)
+        .attr("x", 0)
+        .style("font", options.fontSize + "px ")
+        .style("opacity", 0);
+    }
+
+  
+      var svg = d3.select(el).select("svg");
+      var mouseout = d3.selectAll(".node").on("mouseout");
+      
+      
+      function mouseout_clicked(d) {
+        node.style("opacity", +options.opacity);
+        link.style("opacity", +options.opacity);
+    
+        d3.select(this).select("circle").transition()
+          .duration(750)
+          .attr("r", function(d){return nodeSize(d);});
+        d3.select(this).select("text").transition()
+          .duration(1250)
+          .attr("x", 0)
+          .style("font", options.fontSize + "px ");
+      }
+      
+      function onclick(d) {
+        if (d3.select(this).on("mouseout") == mouseout) {
+          d3.select(this).on("mouseout", mouseout_clicked);
+        } else {
+          d3.select(this).on("mouseout", mouseout);
+        }
+        
+        node.select("text").transition()
+        .duration(750)
+        .attr("x", 13)
+        .style("stroke-width", ".5px")
+        .style("font", 24 + "px ")
+        .style("opacity", function(o) { return d.index == o.index || neighboring(d, o) ? 1 : 0; });
+        
+      }
+      
+        d3.selectAll(".node").on("click", onclick);
+  
+}
+
+'
+```
+
+
+
+```{r}
+## similarity networks
+library(networkD3)
+
+movie_network <- function(movie = NULL) {
+   nodes <- horror_sim %>%
+    {if(is.null(movie)) horror_sim else horror_sim %>% filter(title1 %in% movie)} %>%
+    select(label = title1) %>%
+    bind_rows(horror_sim %>%
+      {if(is.null(movie)) horror_sim %>% select(label = title2) else horror_sim %>% filter(title1 %in% movie) %>% group_by(title1) %>% arrange(desc(similarity)) %>% top_n(n = 10, wt = similarity) %>% ungroup() %>% select(label = title2)}) %>%
+    distinct() %>%
+    rowid_to_column("id") %>%
+    mutate(id = id-1)
+   
+
+  edges <- horror_sim %>%
+        {if(is.null(movie)) horror_sim %>% group_by(title1) %>% top_n(n = 10, wt = similarity) else horror_sim %>% filter(title1 %in% movie) %>% group_by(title1) %>% arrange(desc(similarity)) %>% top_n(n = 10, wt = similarity) %>% ungroup()} %>%
+        select(title1, title2, similarity) %>%
+        ungroup() %>%
+        left_join(nodes %>% rename(from = id), by = c("title1" = "label")) %>%
+        left_join(nodes %>% rename(to = id), by = c("title2" = "label")) %>%
+        mutate(value2 = 1) %>%
+        select(from, to, title1, title2, similarity, value2)
+
+  htmlwidgets::onRender(forceNetwork(Links = edges,
+                                       Nodes = nodes,
+                                       Source = "from",
+                                       Target = "to",
+                                       NodeID = "label",
+                                       Group = "id",
+                                       Value = "value2",
+                                       opacity = 1,
+                                       fontSize = 12,
+                                       arrows = TRUE,
+                                       zoom = TRUE), customjs2)
+}
+
+
+top10_horror <- horror3 %>%
+    arrange(desc(imdb_rating)) %>%
+    slice_head(n = 10) %>%
+    pull(title)
+  
+  
+movie_network(top10_horror)
+
+```
+
+
+
+
+# EDA
+
+```{r}
+library(corrr)
+
+horror3 %>%
+    select(starts_with("genre"), -genre_horror) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    correlate(quiet = TRUE) %>%
+    # shave() %>%
+    pivot_longer(2:ncol(.)) %>%
+    drop_na() %>%
+    ggplot(aes(term, name, fill = value)) +
+    geom_tile() +
+    scale_fill_distiller(palette = "RdBu", direction = 1) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    labs(x = "", y = "")
+
+```
+
+
+
+
+```{r}
+## imdb vs. metacritic scores
+horror3 %>%
+    drop_na(metacritic_score) %>%
+    ggplot(aes(imdb_rating, metacritic_score)) +
+    geom_point() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+
+
+```{r}
+## ratings over time 
+horror3 %>%
+    filter(year > 1920) %>%
+    ggplot(aes(year, imdb_rating, alpha = 0.4, size = 2)) +
+    geom_point()+
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    guides(alpha = FALSE)
+
+```
+
+
+
+```{r}
+## boxplots of decades 
+horror3 %>%
+    filter(year > 1920) %>%
+    mutate(decade = (year %/% 10) * 10,
+           decade = factor(decade)) %>% 
+    select(title, imdb_rating, decade, rating_floor, gross_world) %>% 
+    ggplot(aes(imdb_rating, fct_rev(decade), color = decade)) +
+    # geom_point() + 
+    geom_boxplot() +
+    labs(x = "IMDB Rating", y = "") +
+    guides(color = FALSE)
+
+```
+
+
+
+```{r message=FALSE}
+## movies with low cosine similarity scores
+sim_count <- horror_sim %>%
+    group_by(item1, title1) %>%
+    top_n(10, wt = similarity) %>%
+    ungroup() %>%
+    count(title2, item2, sort = TRUE, name = "n_top_tens")
+
+horror_most_similar <- horror_sim %>%
+    group_by(item1, title1) %>%
+    top_n(10, wt = similarity) %>% 
+    summarize(avg_similarity = mean(similarity)) %>% 
+    left_join(sim_count, by = c("item1" = "item2")) %>% 
+    left_join(horror_sim %>% select(item1, title1, imdb_rating1)) %>%
+    select(-title2) %>%
+    mutate(n_top_tens = replace_na(n_top_tens, 0)) %>%
+    distinct() %>%
+    arrange(desc(avg_similarity))
+ 
+
+## similarity vs. rating
+horror_most_similar %>%
+    filter(title1 %in% c("Eraserhead", "Saw", "Night of the Living Dead", "The Purge", 
+                         "Friday the 13th", "Alien", "The Exorcist", "The Omen", 
+                         "Blair Witch", "A Nightmare on Elm Street", "Paranormal Activity", 
+                         "The Babadook", "Suspiria", "The Conjuring", "Midsommar",
+                         "Rosemary's Baby", "The Lighthouse", "Us", "Get Out", "Mother!",
+                         "What We Do in the Shadows")) %>%
+    ggplot(aes(avg_similarity, imdb_rating1, size = n_top_tens, 
+               color = n_top_tens, label = title1, alpha = 0.9)) +
+    geom_point() +
+    ggrepel::geom_text_repel(aes(size = 8)) +
+    theme_classic() +
+    guides(alpha = FALSE, color = FALSE, size = FALSE) +
+    labs(y = "IMDB Rating", x = "Avg Similarity", title = "Average Similarity vs. IMDB Rating",
+         subtitle = "Circle size represents the number of top ten similarity scores that movie is in")
+
+
+
+```
+
+
+
+
+```{r include = FALSE, eval=FALSE}
+library(tidymodels)
+library(textrecipes)
+
+horror_raw <- horror3 %>%
+    select(id, title, imdb_rating, keywords) %>%
+    mutate(keywords = str_remove_all(keywords, "\\|"))
+
+
+horror_split <-  initial_split(horror_raw)
+horror_train <- training(horror_split)
+horror_test <- testing(horror_split)
+horror_folds <- vfold_cv(horror_train)
+
+glmnet_recipe <- recipe(imdb_rating ~ ., data = horror_train) %>% 
+  update_role(id, new_role = "id") %>%
+  update_role(title, new_role = "id") %>% 
+  step_tokenize(keywords) %>%
+  step_stopwords(keywords) %>% 
+  step_ngram(keywords, num_tokens = 2, min_num_tokens = 1) %>%
+  step_tokenfilter(keywords, max_tokens = 5000, min_times = 2 ) %>%
+  step_tfidf(keywords) %>%
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors()) 
+
+glmnet_spec <- linear_reg(penalty = tune(), mixture = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("glmnet") 
+
+glmnet_workflow <- workflow() %>% 
+  add_recipe(glmnet_recipe) %>% 
+  add_model(glmnet_spec) 
+
+glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1, length.out = 20), mixture = c(0.05, 
+    0.2, 0.4, 0.6, 0.8, 1)) 
+
+glmnet_tune <- tune_grid(glmnet_workflow, 
+                         resamples = horror_folds, 
+                         grid = glmnet_grid,
+                         control = control_grid(save_pred = TRUE, pkgs = c('textrecipes')))
+
+show_best(glmnet_tune, metric = "rsq")
+```
+
+
+
+
+```{r include = FALSE, eval=FALSE}
+horror_train %>%
+  mutate(n_words = tokenizers::count_words(keywords)) %>%
+  select(n_words)  %>%
+  ggplot(aes(x = n_words)) +
+  geom_histogram()
+```
+
+
+
+```{r include = FALSE, eval=FALSE}
+
+max_words <- 6000
+max_length <- 650 ## EDIT 
+
+dense_rec <- recipe(~ keywords, data = horror_train %>% select(keywords)) %>%
+  step_tokenize(keywords) %>%
+  step_stopwords(keywords) %>%
+  step_tokenfilter(keywords, max_tokens = max_words) %>%
+  step_sequence_onehot(keywords, sequence_length = max_length, padding = "post")
+
+dense_prep <- prep(dense_rec)
+dense_baked <- bake(dense_prep, new_data = NULL, composition = "matrix")
+
+```
+
+
+
+```{r include = FALSE, eval=FALSE}
+
+set.seed(345)
+
+
+## create fit_split function
+fit_split <- function(split, prepped_rec) {
+
+  ## preprocessing
+  x_train <- bake(prepped_rec,
+                  new_data = analysis(split),
+                  composition = "matrix")
+
+  x_val <- bake(prepped_rec,
+                new_data = assessment(split),
+                composition = "matrix")
+
+  ## create model
+  y_train <- analysis(split) %>% pull(imdb_rating)
+  y_val <- assessment(split) %>% pull(imdb_rating)
+
+
+  mod <- keras_model_sequential() %>%
+    layer_embedding(input_dim = max_words + 1,
+                    output_dim = 12,
+                    input_length = max_length) %>%
+    layer_flatten() %>%
+    layer_dense(units = 64, activation = "relu") %>% 
+    layer_dense(units = 64, activation = "relu") %>% 
+    layer_dense(units = 64, activation = "relu") %>% 
+    layer_dense(units = 64, activation = "relu") %>% 
+    layer_dense(units = 32, activation = "relu") %>% 
+    layer_dense(units = 1) %>%
+    compile(optimizer = "rmsprop",
+            loss = "mse",
+            metrics = c("mae", "rsq"))
+
+  ## fit model
+  mod %>%
+    fit(x_train,
+        y_train,
+        epochs = 20, ## vary  
+        validation_data = list(x_val, y_val), 
+        batch_size = 32,
+        callbacks = list(callback_early_stopping(patience = 5)),
+        verbose = FALSE)
+
+  ## evaluate model
+  
+  
+  ## leave in metrics to compare accuracy, but comment out for conf_mat
+}
+```
+
+
+
+
+```{r include = FALSE, eval=FALSE}
+cv_fitted <- horror_folds %>%
+  mutate(validation = map(splits, fit_split, dense_prep))
+
+
+```
+
