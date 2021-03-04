@@ -149,98 +149,98 @@ word_filter <- c("ghost|vampire|existential|haunt|alien|zomb|demon|devil|cosmic|
                  cosmic|house")
 
 horror_words <- horror_words %>%
-    filter(str_detect(word, word_filter),
-           !str_detect(word, "illegal|rape")) 
+  filter(str_detect(word, word_filter),
+         !str_detect(word, "illegal|rape")) 
 
 
 ## UI 
 ui <- fluidPage(theme = shinytheme("darkly"),
-  # shinythemes::themeSelector(),  
-  tabsetPanel(
-
-      tabPanel("Find Movies",
-               fluidRow(
-                 column(12,
-                   pickerInput(inputId = "keywords_choice",
-                               label = "Keywords",
-                               choices = horror_words %>% arrange(word) %>% pull(word) %>% unique(),
-                               options = list(`actions-box` = TRUE,
-                                              "max-options" == "false",
-                                              `live-search` = TRUE),
-                               multiple = TRUE,
-                               selected = horror_words %>% arrange(word) %>% pull(word) %>% unique()),
-                 
-
+                # shinythemes::themeSelector(),  
+                tabsetPanel(
+                  
+                  tabPanel("Find Movies",
+                           fluidRow(
+                             column(12,
+                                    pickerInput(inputId = "keywords_choice",
+                                                label = "Keywords",
+                                                choices = horror_words %>% arrange(word) %>% pull(word) %>% unique(),
+                                                options = list(`actions-box` = TRUE,
+                                                               "max-options" == "false",
+                                                               `live-search` = TRUE),
+                                                multiple = TRUE,
+                                                selected = horror_words %>% arrange(word) %>% pull(word) %>% unique()),
+                                    
+                                    
+                             )
+                           ),
+                           
+                           fluidRow(
+                             column(12, textOutput(outputId = "explanation"))
+                           ),
+                           
+                           fluidRow(plotlyOutput(outputId = "rating_plot")),
+                           
+                           # br(),
+                           # br(),
+                           
+                           fluidRow(dataTableOutput("table", width = "100%"))
+                           
+                  ),
+                  
+                  tabPanel("Movie Recommendations",
+                           
+                           sidebarLayout(
+                             sidebarPanel(
+                               
+                               pickerInput(inputId = "movie_title",
+                                           label = "Movie",
+                                           choices = horror3 %>% arrange(desc(imdb_rating)) %>% pull(title) %>% unique(),
+                                           options = list(`actions-box` = TRUE,
+                                                          "max-options" == "false",
+                                                          `live-search` = TRUE),
+                                           multiple = TRUE,
+                                           selected = horror3 %>% arrange(desc(imdb_rating)) %>% slice(1:10) %>% pull(title) %>% unique()),
+                               
+                               sliderInput(inputId = "threshold",
+                                           label = "IMDB rating threshold for recommendation",
+                                           value = 6.5,
+                                           min = 0,
+                                           max = 8.5),
+                               
+                               # pickerInput(inputId = "director_name",
+                               #             label = "Director",
+                               #             choices = horror3 %>% arrange(directors) %>% pull(directors) %>% unique(),
+                               #             options = list(`actions-box` = TRUE,
+                               #                            "max-options" == "false",
+                               #                            `live-search` = TRUE),
+                               #             multiple = TRUE,
+                               #             selected = horror3 %>% arrange(directors) %>% slice(1:10) %>% pull(directors) %>% unique()),
+                               
+                             ),
+                             
+                             
+                             
+                             mainPanel(
+                               textOutput("explanation2"),
+                               br(),
+                               br(),
+                               # textOutput("rec"),
+                               forceNetworkOutput(outputId = "net"),
+                               dataTableOutput("rec"),
+                               br(),
+                               br(),
+                               plotOutput(outputId = "similar_plot",
+                                          height = "600px")
+                               
+                             ),
+                             
+                           ),
+                           
+                           
                   )
-               ),
-                 
-               fluidRow(
-                 column(12, textOutput(outputId = "explanation"))
-               ),
-               
-               fluidRow(plotlyOutput(outputId = "rating_plot")),
-               
-               # br(),
-               # br(),
-               
-               fluidRow(dataTableOutput("table", width = "100%"))
-
-               ),
-
-      tabPanel("Movie Recommendations",
-
-               sidebarLayout(
-                 sidebarPanel(
-
-                   pickerInput(inputId = "movie_title",
-                               label = "Movie",
-                               choices = horror3 %>% arrange(desc(imdb_rating)) %>% pull(title) %>% unique(),
-                               options = list(`actions-box` = TRUE,
-                                              "max-options" == "false",
-                                              `live-search` = TRUE),
-                               multiple = TRUE,
-                               selected = horror3 %>% arrange(desc(imdb_rating)) %>% slice(1:10) %>% pull(title) %>% unique()),
-                   
-                   sliderInput(inputId = "threshold",
-                               label = "IMDB rating threshold for recommendation",
-                               value = 6.5,
-                               min = 0,
-                               max = 8.5),
-                   
-                   # pickerInput(inputId = "director_name",
-                   #             label = "Director",
-                   #             choices = horror3 %>% arrange(directors) %>% pull(directors) %>% unique(),
-                   #             options = list(`actions-box` = TRUE,
-                   #                            "max-options" == "false",
-                   #                            `live-search` = TRUE),
-                   #             multiple = TRUE,
-                   #             selected = horror3 %>% arrange(directors) %>% slice(1:10) %>% pull(directors) %>% unique()),
-                 
-                 ),
-                 
+                  
+                )
                 
-
-                 mainPanel(
-                   textOutput("explanation2"),
-                   br(),
-                   br(),
-                   # textOutput("rec"),
-                   forceNetworkOutput(outputId = "net"),
-                   dataTableOutput("rec"),
-                   br(),
-                   br(),
-                   plotOutput(outputId = "similar_plot",
-                              height = "600px")
-
-                 ),
-
-               ),
-
-
-      )
-  
-  )
-  
 )
 
 
@@ -249,30 +249,30 @@ server <- function(input, output, session) {
   
   
   horror_filtered <- reactive({
-
+    
     horror3 %>%
       filter(title %in% input$movie_title)
-
+    
   })
-
-
+  
+  
   horror_sim_filtered <- reactive({
-
+    
     horror_sim_small %>%
       filter(title1 %in% input$movie_title) 
-
+    
   })
   
   
   horror_select <- reactive({
-
+    
     keyword_vec <- paste(input$keywords_choice, collapse = "|")
-
+    
     horror3 %>%
       filter(str_detect(keywords, keyword_vec))
-
+    
   })
-
+  
   
   # observe({
   #   
@@ -290,10 +290,10 @@ server <- function(input, output, session) {
   #   
   # })
   
-
+  
   
   nodes <- reactive({
-
+    
     horror_sim_filtered() %>%
       {if(is.null(input$movie_title)) horror_sim_filtered() else horror_sim_filtered() %>% filter(title1 %in% input$movie_title)} %>%
       select(label = title1) %>%
@@ -303,10 +303,10 @@ server <- function(input, output, session) {
       rowid_to_column("id") %>%
       mutate(id = id-1) 
   })
-
-
+  
+  
   edges <- reactive({
-
+    
     horror_sim_filtered() %>%
       {if(is.null(input$movie_title)) horror_sim_filtered() %>% group_by(title1) %>% top_n(n = 10, wt = similarity) else horror_sim_filtered() %>% filter(title1 %in% input$movie_title) %>% group_by(title1) %>% arrange(desc(similarity)) %>% top_n(n = 10, wt = similarity) %>% ungroup()} %>%
       select(title1, title2, similarity) %>%
@@ -315,29 +315,29 @@ server <- function(input, output, session) {
       left_join(nodes() %>% rename(to = id), by = c("title2" = "label")) %>%
       mutate(value2 = 1) %>%
       select(from, to, title1, title2, similarity, value2)
-
+    
   })
-
-
-
+  
+  
+  
   most_similar <- reactive({
-
+    
     horror_sim_filtered() %>%
       group_by(title1) %>%
       top_n(n = 10, wt = similarity) %>%
       select(title1, title2, similarity, imdb_rating1, imdb_rating2) %>%
       ungroup() %>%
       arrange(desc(imdb_rating1))
-
+    
   })
-
   
   
   
-## Render outputs
+  
+  ## Render outputs
   
   output$net <- renderForceNetwork({
-
+    
     htmlwidgets::onRender(forceNetwork(Links = edges(),
                                        Nodes = nodes(),
                                        Source = "from",
@@ -349,65 +349,65 @@ server <- function(input, output, session) {
                                        fontSize = 12,
                                        arrows = TRUE,
                                        zoom = TRUE), customjs2)
-
+    
   })
   
   
   output$similar_plot <- renderPlot({
-
-     most_similar() %>%
-        mutate(title1 = factor(title1, levels = unique(horror_filtered() %>%
-                                                          select(title, imdb_rating) %>%
-                                                          distinct() %>%
-                                                          arrange(desc(imdb_rating)) %>%
-                                                          pull(title))),
-               title2 = reorder_within(title2, similarity, title1)) %>%
-        ggplot(aes(similarity, title2, fill = imdb_rating2)) +
-        geom_col() +
-        labs(y = "", fill = "IMDB Rating", x = "") +
-        theme_classic() +
-        scale_y_reordered() +
-        facet_wrap(~title1, scales = "free", ncol = 2)
-     
-
+    
+    most_similar() %>%
+      mutate(title1 = factor(title1, levels = unique(horror_filtered() %>%
+                                                       select(title, imdb_rating) %>%
+                                                       distinct() %>%
+                                                       arrange(desc(imdb_rating)) %>%
+                                                       pull(title))),
+             title2 = reorder_within(title2, similarity, title1)) %>%
+      ggplot(aes(similarity, title2, fill = imdb_rating2)) +
+      geom_col() +
+      labs(y = "", fill = "IMDB Rating", x = "") +
+      theme_classic() +
+      scale_y_reordered() +
+      facet_wrap(~title1, scales = "free", ncol = 2)
+    
+    
   })
   
   
   output$rating_plot <- renderPlotly({
-
-      p <- horror_select() %>%
-          filter(year > 1920) %>%
-          mutate(metacritic_score = round(metacritic_score,0)) %>%
-          ggplot(aes(year, imdb_rating, label = title, size = gross_world,
-                     alpha = 0.4, color = metacritic_score)) +
-          geom_point() +
-          theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
-          guides(alpha = FALSE, color = FALSE) +
-          labs(x = "Year", y = "IMDB Rating") +
-          theme_classic()
-      
-      ggplotly(p, tooltip = c("Title" = "title", 
-                              "metacritic_score", 
-                              "imdb_rating", 
-                              "gross_world"))
-
-
+    
+    p <- horror_select() %>%
+      filter(year > 1920) %>%
+      mutate(metacritic_score = round(metacritic_score,0)) %>%
+      ggplot(aes(year, imdb_rating, label = title, size = gross_world,
+                 alpha = 0.4, color = metacritic_score)) +
+      geom_point() +
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+      guides(alpha = FALSE, color = FALSE) +
+      labs(x = "Year", y = "IMDB Rating") +
+      theme_classic()
+    
+    ggplotly(p, tooltip = c("Title" = "title", 
+                            "metacritic_score", 
+                            "imdb_rating", 
+                            "gross_world"))
+    
+    
   })
   
   
   output$table <- renderDT(
-      horror_select() %>%
-          select(title, year, imdb_rating, metacritic_score, summary) %>%
-          arrange(desc(imdb_rating)) %>%
-          rename(`Title` = title,
-                 `Year` = year,
-                 `IMDB Rating` = imdb_rating,
-                 `Metacritic Score` = metacritic_score,
-                 `Summary` = summary),
-      filter = "top",
-      options = list(autoWidth = FALSE,
-                     scrollX = TRUE,
-                     scroller = TRUE))
+    horror_select() %>%
+      select(title, year, imdb_rating, metacritic_score, summary) %>%
+      arrange(desc(imdb_rating)) %>%
+      rename(`Title` = title,
+             `Year` = year,
+             `IMDB Rating` = imdb_rating,
+             `Metacritic Score` = metacritic_score,
+             `Summary` = summary),
+    filter = "top",
+    options = list(autoWidth = FALSE,
+                   scrollX = TRUE,
+                   scroller = TRUE))
   
   
   output$rec <- renderDT(
@@ -429,11 +429,11 @@ server <- function(input, output, session) {
     options = list(autoWidth = FALSE,
                    scrollX = TRUE,
                    scroller = TRUE)
-      
+    
     # print(paste(paste0(rep(1:5), ":"), recs, ",", sep = ", "))  
     
   )
-
+  
   
   
   output$explanation <- renderText({
