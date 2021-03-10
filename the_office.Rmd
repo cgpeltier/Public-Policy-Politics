@@ -1,0 +1,51 @@
+---
+title: "Untitled"
+author: "Chad Peltier"
+date: "3/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+H2O, keras, tidymodels/stacks
+
+
+```{r}
+library(schrute)
+
+the_office <- schrute::theoffice
+
+```
+
+
+
+```{r}
+top_characters <- the_office %>%
+  count(character, sort = TRUE) %>%
+  slice_head(n = 10)
+
+office_top <- the_office %>%
+    filter(character %in% top_characters$character) %>%
+    select(character, text)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

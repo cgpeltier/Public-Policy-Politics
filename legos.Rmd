@@ -1,0 +1,48 @@
+---
+title: "Lego!"
+author: "Chad Peltier"
+date: "3/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(brickset)
+library(janitor)
+library(tidyverse)
+library(GGally)
+library(skimr)
+library(naniar)
+
+legos_cleaned <- brickset::legosets %>% 
+    clean_names() %>% 
+    filter(!is.na(pieces)) 
+
+```
+
+
+
+
+```{r}
+
+legos_cleaned %>%
+  count(us_retail_price, sort = TRUE)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
