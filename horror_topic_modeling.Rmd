@@ -1,0 +1,88 @@
+---
+title: "Untitled"
+author: "Chad Peltier"
+date: "3/9/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+# Horror Sub-genres
+
+
+```{r}
+library(topicmodels)
+library(furrr)
+library(tidyverse)
+library(httr)
+library(rvest)
+library(janitor)
+library(furrr)
+library(tidymodels)
+library(textrecipes)
+library(tidytext)
+library(widyr)
+library(corrr)
+library(lubridate)
+library(here)
+
+horror3 <- read_csv(here("data", "horror3.csv"))
+
+h_dtm <- horror3 %>%
+    rename(text = keywords) %>% 
+    unnest_tokens(word, text) %>%
+    anti_join(stop_words, by = "word") %>%
+    count(title, word, sort = TRUE) %>%
+    filter(!word %in% c("reference")) %>%
+    cast_dtm(title, word, n) 
+    
+```
+
+
+## Choose LDA's k
+
+
+```{r}
+
+horror_topics <- tibble(k = 1:9) %>%
+    mutate(lda = future_map(k, ~ LDA(h_dtm, k = .x, control = list(seed = 123))),
+           glanced = map(lda, glance))
+
+horror_topics %>%
+  unnest(cols = c(glanced)) %>%
+  ggplot(aes(k, tot.withinss)) + ## sub the y
+  geom_line(alpha = 0.5, size = 1.2, color = "midnightblue") +
+  geom_point(size = 2, color = "midnightblue")
+
+```
+
+
+## Final LDA Model
+
+```{r}
+
+h_lda <- LDA(h_dtm, k = ???, control = list(seed = 123))
+
+h_topics <- h_lda %>%
+    tidy(matrix = "beta")
+
+```
+
+
+# Supervised Learning Time
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
