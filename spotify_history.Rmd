@@ -1,0 +1,197 @@
+---
+title: "Untitled"
+author: "Chad Peltier"
+date: "5/3/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(jsonlite)
+library(lubridate)
+library(spotifyr)
+library(janitor)
+library(furrr)
+library(here)
+library(ggbump)
+
+spotify <- read_json(here("spotify_history.json")) %>%
+  bind_rows()
+
+```
+
+
+```{r}
+
+spotify2 <- spotify %>%
+  clean_names() %>%
+  mutate(end_time = ymd_hm(end_time),
+         date = date(end_time),
+         time = hms(str_extract(end_time, " .+")),
+         my = floor_date(date, unit = "month"),
+         month = month(date),
+         year = year(date),
+         quarter = quarter(date),
+         season = case_when(
+           quarter == 1 ~ "Winter",
+           quarter == 2 ~ "Spring",
+           quarter == 3 ~ "Summer",
+           quarter == 4 ~ "Fall"),
+         yq = floor_date(date, unit = "quarter")
+         ) %>%
+  arrange(date, time)
+
+```
+
+# Artist data
+
+
+```{r}
+
+t_heads <- search_spotify("Talking Heads", type = "artist") 
+
+```
+
+
+```{r}
+
+artist_search <- function(artist) {
+  
+  search_spotify(artist, type = "artist") %>%
+    filter(name == artist)
+  
+}
+
+
+possibly_artist <- possibly(artist_search, otherwise = NULL)
+
+n_cores <- availableCores() - 2
+plan(multiprocess, workers = n_cores)
+
+artists <- spotify2 %>%
+  pull(artist_name) %>%
+  unique() %>%
+  future_map(possibly_artist)
+
+future:::ClusterRegistry("stop")
+
+```
+
+
+```{r}
+## remove null list elements
+
+
+artists2 <- artists %>%
+  # map(., ~ discard(.x, ~ class(.x) == "character")) %>%
+  compact() %>%
+  bind_rows() %>%
+  group_by(name) %>%
+  slice_max(followers.total) %>%
+  select(genres, artist_name = name)
+  # summarize(genres = map(genres, c))
+```
+
+
+```{r}
+
+suppressMessages(
+  spotify3 <- spotify2 %>%
+  left_join(artists2) %>%
+  unnest_wider(genres) %>%
+  rename_with(.cols = contains("..."), ~ str_replace(.x, "...", "genre_"))
+)
+
+spotify4 <- spotify3 %>%
+  rownames_to_column() %>%
+  select(rowname, artist_name, contains("genre")) %>%
+  pivot_longer(cols = contains("genre"),
+               values_drop_na = TRUE) %>% 
+  add_column(count = 1) %>% 
+  arrange(value) %>% 
+  pivot_wider(id_cols = c(rowname, artist_name), 
+              names_from = value, 
+              values_from = count, 
+              values_fill = list(count = 0), 
+              values_fn = list(count = mean)) %>% 
+  arrange(as.integer(rowname)) %>% 
+  select(-rowname) %>%
+  distinct() 
+
+spotify5 <- spotify3 %>%
+  select(-contains("genre")) %>%
+  left_join(spotify4, by = "artist_name")
+
+```
+
+
+```{r}
+## genres summarizations
+
+genre_plays <- spotify3 %>%
+  rownames_to_column() %>%
+  select(rowname, artist_name, contains("genre")) %>%
+  pivot_longer(cols = contains("genre"),
+               values_drop_na = TRUE) %>%
+  count(value)
+
+genre_artists <- spotify3 %>%
+  rownames_to_column() %>%
+  select(artist_name, contains("genre")) %>%
+  pivot_longer(cols = contains("genre"),
+               values_drop_na = TRUE) %>%
+  distinct()
+```
+
+
+# Top Music by different periods of time
+
+```{r}
+
+## artists by season
+spotify2 %>%
+  count(yq, artist_name, sort = TRUE) %>%
+  group_by(yq) %>% 
+  slice_head(n = 5) %>%
+  group_by(yq) %>% 
+  mutate(rank = rank(-n, ties.method = "random")) %>% 
+  # ungroup() %>%
+  ggplot(aes(yq, rank, color = artist_name)) +
+  geom_bump(smooth = 15, size = 2) +
+  # geom_point(size = 7) +
+  # geom_text(aes(label = artist_name)) + 
+  theme(panel.grid = element_blank(),
+        plot.background = element_rect(fill = "white"),
+        panel.background = element_rect(fill = "white"),
+        # axis.text.y = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(x = "", y = "") + 
+  scale_y_reverse()
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
